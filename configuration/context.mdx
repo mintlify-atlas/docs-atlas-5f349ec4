@@ -1,0 +1,203 @@
+---
+title: "Web Application Context Configuration in Tomcat"
+sidebarTitle: "Context"
+description: "Configure web application contexts in Tomcat using context.xml, per-app META-INF/context.xml, or inline <Context> elements in server.xml. Covers JNDI, sessions, and resources."
+---
+
+A `<Context>` element in Tomcat represents a single web application. It carries the application's URL path mapping, its physical location on disk, session configuration, JNDI resource bindings, and reload behaviour. Context configuration is assembled from multiple sources in a defined order: first the global `conf/context.xml`, then any per-host context directory, and finally the application's own `META-INF/context.xml`. Later sources override earlier ones for attributes they define.
+
+## Context Configuration Files
+
+Tomcat reads context configuration from the following locations, in order:
+
+<Steps>
+  <Step title="Global context.xml — $CATALINA_BASE/conf/context.xml">
+    Applied to **every** web application running in this Tomcat instance. Use this file for settings that should be uniform across all apps, such as `<WatchedResource>` declarations or a common session cookie policy. This is the file you edit most often for instance-wide defaults.
+  </Step>
+  <Step title="Per-host context fragment — $CATALINA_BASE/conf/<Engine>/<Host>/<app>.xml">
+    Applied only to a named application on a named virtual host. For example, `conf/Catalina/localhost/myapp.xml` configures the `myapp` context on the `localhost` virtual host. Useful for environment-specific overrides (e.g., JNDI data sources that differ between staging and production) without touching the WAR itself.
+  </Step>
+  <Step title="Application META-INF/context.xml">
+    Packaged inside the WAR at `META-INF/context.xml`. Applied to the application wherever it is deployed. Suitable for app-level configuration that travels with the artifact, such as default resource declarations. Can be disabled per-Host by setting `copyXML="false"` on the `<Host>`.
+  </Step>
+</Steps>
+
+<Note>
+  Inline `<Context>` elements embedded directly inside a `<Host>` in `server.xml` are also supported, but discouraged. They force a full Tomcat restart to change context configuration. Prefer standalone context fragment files in `conf/Catalina/localhost/` instead.
+</Note>
+
+## Default conf/context.xml
+
+The following is the default `conf/context.xml` that ships with Tomcat. It applies globally to all web applications:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The contents of this file will be loaded for each web application -->
+<Context>
+
+    <!-- Default set of monitored resources. If one of these changes, the    -->
+    <!-- web application will be reloaded.                                   -->
+    <WatchedResource>WEB-INF/web.xml</WatchedResource>
+    <WatchedResource>WEB-INF/tomcat-web.xml</WatchedResource>
+    <WatchedResource>${catalina.base}/conf/web.xml</WatchedResource>
+
+    <!-- Uncomment this to enable session persistence across Tomcat restarts -->
+    <!--
+    <Manager pathname="SESSIONS.ser" />
+    -->
+</Context>
+```
+
+## Key `<Context>` Attributes
+
+| Attribute | Default | Description |
+|---|---|---|
+| `path` | — | URL context path for the application. An empty string (`""`) maps to the ROOT application at `/`. Required when declaring a `<Context>` inline in `server.xml`; inferred from the file name when using context fragment files. |
+| `docBase` | — | Absolute path, or path relative to the `<Host>`'s `appBase`, pointing to the deployed WAR file or exploded directory. |
+| `reloadable` | `false` | When `true`, Tomcat monitors `WEB-INF/classes` and `WEB-INF/lib` for changes and automatically reloads the application. Useful in development; has a performance cost and should be `false` in production. |
+| `crossContext` | `false` | Allow this application to acquire a `RequestDispatcher` to contexts in other web applications via `ServletContext.getContext()`. |
+| `override` | `false` | Set to `true` to prevent the global `conf/context.xml` from applying to this application. Allows a per-host fragment to act as the sole configuration source. |
+| `sessionCookieName` | `JSESSIONID` | Name of the HTTP session tracking cookie. Override to avoid conflicts when multiple apps run on the same domain. |
+| `sessionCookiePath` | Context path | Cookie `Path` attribute. Set to `/` to share the session cookie across all contexts on the same host. |
+| `sessionCookieSecure` | `false` | Set to `true` to mark the session cookie with the `Secure` flag, restricting it to HTTPS connections. |
+| `sessionCookieHttpOnly` | `true` | Controls the `HttpOnly` flag on the session cookie. |
+| `useHttpOnly` | `true` | Alias for `sessionCookieHttpOnly`. Set `HttpOnly` on the `JSESSIONID` cookie to prevent JavaScript access. |
+| `antiResourceLocking` | `false` | When `true`, Tomcat copies the application to a work directory before deploying it. Prevents file-locking issues on Windows that block redeployment while the JVM holds open file handles. |
+
+## JNDI Resource Configuration
+
+JNDI resources declared inside a `<Context>` make connection pools, mail sessions, and other managed objects available to web applications under the `java:comp/env` namespace. The most common use case is a JDBC `DataSource`.
+
+The following example configures a MySQL connection pool using the bundled Tomcat DBCP2 connection pool factory:
+
+```xml
+<Context path="/myapp" docBase="myapp">
+
+  <Resource name="jdbc/MyDB"
+            auth="Container"
+            type="javax.sql.DataSource"
+            driverClassName="com.mysql.cj.jdbc.Driver"
+            url="jdbc:mysql://localhost:3306/mydb?useSSL=false&amp;serverTimezone=UTC"
+            username="dbuser"
+            password="secret"
+            maxTotal="20"
+            maxIdle="10"
+            maxWaitMillis="10000"
+            validationQuery="SELECT 1"
+            testOnBorrow="true" />
+
+</Context>
+```
+
+The web application looks up the resource in `web.xml`:
+
+```xml
+<resource-ref>
+  <description>MySQL DataSource</description>
+  <res-ref-name>jdbc/MyDB</res-ref-name>
+  <res-type>javax.sql.DataSource</res-type>
+  <res-auth>Container</res-auth>
+</resource-ref>
+```
+
+And obtains it in servlet code:
+
+```java
+Context initCtx = new InitialContext();
+Context envCtx  = (Context) initCtx.lookup("java:comp/env");
+DataSource ds   = (DataSource) envCtx.lookup("jdbc/MyDB");
+Connection conn = ds.getConnection();
+```
+
+<Note>
+  Place the JDBC driver JAR in `$CATALINA_BASE/lib/` (available to all applications) or in the application's `WEB-INF/lib/` (private to that application). Do not place it in both locations.
+</Note>
+
+## WatchedResource
+
+`<WatchedResource>` tells Tomcat which files to monitor for changes. When a watched file is modified, the application is automatically reloaded. Paths can be absolute or relative to the application's root; `${catalina.base}` is substituted at runtime.
+
+The defaults from `conf/context.xml` watch three files:
+
+```xml
+<WatchedResource>WEB-INF/web.xml</WatchedResource>
+<WatchedResource>WEB-INF/tomcat-web.xml</WatchedResource>
+<WatchedResource>${catalina.base}/conf/web.xml</WatchedResource>
+```
+
+You can add additional entries to watch your own configuration files:
+
+```xml
+<WatchedResource>WEB-INF/myapp-config.properties</WatchedResource>
+```
+
+<Note>
+  `<WatchedResource>` monitoring only triggers a reload when `reloadable="true"` is **not** set (i.e., class-level reloading is off). The resources themselves are always watched regardless of `reloadable`.
+</Note>
+
+## Session Manager Configuration
+
+Tomcat's session persistence strategy is controlled by the `<Manager>` element inside `<Context>`.
+
+<CardGroup cols={2}>
+  <Card title="StandardManager (default)" icon="database">
+    In-memory session storage. Sessions are serialised to a file (`SESSIONS.ser`) only on graceful shutdown and reloaded on next startup. No configuration required — this is the default when no `<Manager>` element is present.
+
+    ```xml
+    <!-- Enable persistence across restarts -->
+    <Manager pathname="SESSIONS.ser" />
+    ```
+  </Card>
+  <Card title="PersistentManager" icon="hard-drive">
+    Stores sessions in an external backing store. Idle sessions can be swapped out to the store to reduce memory usage. Requires a nested `<Store>` element specifying the backend.
+
+    ```xml
+    <Manager className="org.apache.catalina.session.PersistentManager"
+             maxIdleSwap="30">
+      <Store className="org.apache.catalina.session.FileStore"
+             directory="sessions" />
+    </Manager>
+    ```
+  </Card>
+</CardGroup>
+
+### FileStore
+
+Serialises each session to a separate file in a directory:
+
+```xml
+<Context path="/myapp" docBase="myapp">
+  <Manager className="org.apache.catalina.session.PersistentManager"
+           saveOnRestart="true"
+           maxActiveSession="-1"
+           minIdleSwap="60"
+           maxIdleSwap="120"
+           maxIdleBackup="30">
+    <Store className="org.apache.catalina.session.FileStore"
+           directory="${catalina.base}/work/sessions/myapp" />
+  </Manager>
+</Context>
+```
+
+### DataSourceStore (JDBC)
+
+Persists sessions to a relational database. Requires the JNDI DataSource to be configured first:
+
+```xml
+<Context path="/myapp" docBase="myapp">
+  <Resource name="jdbc/MyDB" auth="Container" type="javax.sql.DataSource"
+            ... />
+
+  <Manager className="org.apache.catalina.session.PersistentManager">
+    <Store className="org.apache.catalina.session.JDBCStore"
+           dataSourceJndiName="jdbc/MyDB"
+           sessionTable="tomcat_sessions"
+           sessionIdCol="session_id"
+           sessionDataCol="session_data"
+           sessionValidCol="session_valid"
+           sessionMaxInactiveCol="max_inactive"
+           sessionLastAccessedCol="last_access"
+           sessionAppCol="app_name" />
+  </Manager>
+</Context>
+```

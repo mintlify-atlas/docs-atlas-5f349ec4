@@ -1,0 +1,149 @@
+---
+title: "Class Loading Architecture in Apache Tomcat"
+sidebarTitle: "Class Loading"
+description: "Understand Tomcat's hierarchical class loader architecture: Bootstrap, System, Common, Catalina, Shared, and per-webapp WebAppClassLoader. Configure common.loader and shared.loader."
+---
+
+Tomcat uses a custom hierarchical ClassLoader architecture to isolate web applications from each other and from Tomcat internals. Each web application deployed to the same server gets its own `WebappClassLoader` instance, which means two applications can use different versions of the same library without conflict — and a library upgrade in one application cannot break another.
+
+## ClassLoader Hierarchy
+
+Tomcat creates the following loader hierarchy at startup:
+
+```
+Bootstrap ClassLoader (JVM built-in)
+    └── Extension/Platform ClassLoader (JDK modules)
+            └── System ClassLoader
+                    └── Common ClassLoader  ← $CATALINA_HOME/lib/*.jar
+                            ├── Catalina ClassLoader  ← Tomcat internals (not visible to apps)
+                            ├── Shared ClassLoader  ← optional shared libraries
+                            │       ├── WebApp1 ClassLoader  ← WEB-INF/classes, WEB-INF/lib/*.jar
+                            │       ├── WebApp2 ClassLoader
+                            │       └── ...
+```
+
+| ClassLoader | Source | Visible To |
+|-------------|--------|------------|
+| Bootstrap | JVM core + JDK modules | Everyone |
+| System | `$CATALINA_HOME/bin/bootstrap.jar`, `tomcat-juli.jar` | Everyone |
+| Common | `$CATALINA_HOME/lib/*.jar` (e.g., servlet-api.jar) | Tomcat internals + all web apps |
+| Catalina (Server) | `$CATALINA_HOME/lib/` (server-internal) | Tomcat internals only |
+| Shared | Configured via `shared.loader` | All web apps (not Tomcat internals) |
+| WebApp | `WEB-INF/classes/`, `WEB-INF/lib/*.jar` | That application only |
+
+## Web Application ClassLoader Behavior
+
+The `WebappClassLoader` deliberately **inverts** the standard Java parent-first delegation model for application-level classes. The lookup order is:
+
+1. JVM Bootstrap (Java SE APIs) — always first for security
+2. `WEB-INF/classes/` — application classes
+3. `WEB-INF/lib/*.jar` — application JARs
+4. Common ClassLoader (parent) — shared classes, Tomcat APIs
+
+This means a web application can override a library version in `Common` by placing its own version in `WEB-INF/lib/`. Jakarta EE API classes and Tomcat internal classes are always loaded from the parent (they cannot be overridden).
+
+<Note>
+  The parent-last behavior is specific to non-system, non-Jakarta-EE classes. The JDK's built-in classes (`java.*`, `javax.*` in older JDKs, `jakarta.*`) always come from the Bootstrap or Common loader first.
+</Note>
+
+## Configuring Loaders via catalina.properties
+
+The three configurable loaders are defined in `$CATALINA_HOME/conf/catalina.properties`:
+
+```properties conf/catalina.properties
+# Classes and JARs shared with all web applications AND Tomcat internals
+common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar","${catalina.home}/lib","${catalina.home}/lib/*.jar"
+
+# Classes and JARs used by Tomcat internals only (not visible to web apps)
+server.loader=
+
+# Classes and JARs shared with all web applications only (not Tomcat internals)
+shared.loader=
+```
+
+Path prefix rules:
+
+| Entry | Meaning |
+|-------|---------|
+| `"${catalina.home}/lib"` | Add a directory as a class repository |
+| `"${catalina.home}/lib/*.jar"` | Add all JARs in a directory |
+| `"/absolute/path/mylib.jar"` | Add a specific JAR |
+
+To add a shared library visible to all web applications (but not Tomcat internals), set `shared.loader`:
+
+```properties
+shared.loader="${catalina.base}/shared/lib/*.jar"
+```
+
+Then place JARs in `$CATALINA_BASE/shared/lib/`.
+
+## Adding Libraries to Common vs. WEB-INF/lib
+
+Choose where to place a library based on its scope:
+
+| Library type | Recommended location |
+|--------------|----------------------|
+| Application-specific dependency | `WEB-INF/lib/` |
+| JDBC driver used via JNDI DataSource | `$CATALINA_HOME/lib/` |
+| Library shared across all deployed apps | `$CATALINA_BASE/shared/lib/` |
+| Library needed by Tomcat itself | `$CATALINA_HOME/lib/` |
+
+<Warning>
+  Placing JDBC drivers in `WEB-INF/lib/` when using a JNDI DataSource (defined in server.xml) will cause `ClassNotFoundException` at startup because the DataSource is created by the Common ClassLoader, which cannot see `WEB-INF/lib/`. Always put the driver in `$CATALINA_HOME/lib/` for JNDI-managed data sources.
+</Warning>
+
+## Application Isolation and ClassLoader GC
+
+When a web application is undeployed (via the Manager app or autoDeploy), Tomcat calls `Context.stop()` and then discards the `WebappClassLoader`. The GC can then reclaim all classes loaded by that loader — provided no static references remain in parent ClassLoaders.
+
+### Memory Leaks
+
+Memory leaks occur when code in a web application (or a library) leaves a reference to a class loaded by the `WebappClassLoader` in a longer-lived data structure visible to the Common ClassLoader. Common causes:
+
+- **ThreadLocal variables**: If a thread in the common thread pool was used to execute application code that stored something in a `ThreadLocal`, and the ThreadLocal is never cleaned up, the ClassLoader cannot be GC'd.
+- **Static fields in shared libraries**: A static `Map<Class<?>, ...>` in a library placed in `Common` that stores app-loaded classes.
+- **Driver registration**: JDBC drivers registered via `DriverManager.registerDriver()` from `WEB-INF/lib/` stay registered in the JVM-wide `DriverManager`.
+
+Tomcat ships with two Lifecycle Listeners to mitigate known JDK and library leaks:
+
+- `JreMemoryLeakPreventionListener` — workarounds for JDK-level memory leaks (LDAP, DOM parsers, etc.)
+- `ThreadLocalLeakPreventionListener` — renews threads in the common executor pool when a context stops, ensuring no ThreadLocal values from the old ClassLoader survive
+
+Both are configured by default in `server.xml`:
+
+```xml
+<Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+<Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+```
+
+## JAR Scanning
+
+At startup, Tomcat scans WEB-INF/lib JARs for:
+
+- `META-INF/web-fragment.xml` — Jakarta EE web fragments
+- `META-INF/services/jakarta.servlet.ServletContainerInitializer` — SCI registrations
+- `*.tld` — Tag Library Descriptors (for JSP)
+
+Scanning all JARs on every startup can be slow for large applications. Control scanning with the `JarScanner` configuration and the `jarsToSkip` property in `catalina.properties`:
+
+```properties conf/catalina.properties
+# Comma-separated list of JAR names to skip (glob patterns supported)
+tomcat.util.scan.StandardJarScanFilter.jarsToSkip=bootstrap.jar,commons-daemon.jar,...
+```
+
+You can also configure a custom `StandardJarScanner` in `context.xml`:
+
+```xml
+<Context>
+    <JarScanner scanManifest="false" scanClassPath="false" />
+</Context>
+```
+
+<CardGroup cols={2}>
+  <Card title="Deploying Apps" icon="box" href="/operations/deploying-apps">
+    Learn how Tomcat's ClassLoader relates to WAR deployment and hot reload.
+  </Card>
+  <Card title="Context Configuration" icon="gear" href="/configuration/context">
+    Configure WebappLoader and other Context-level class loading settings.
+  </Card>
+</CardGroup>

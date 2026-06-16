@@ -1,0 +1,204 @@
+---
+title: "Deploying Web Applications to Apache Tomcat"
+sidebarTitle: "Deploying Apps"
+description: "Deploy WAR files and exploded directories to Tomcat using autoDeploy, the Manager app, the Ant task, or programmatic context configuration. Covers hot reload and context isolation."
+---
+
+Tomcat supports several deployment methods to suit different workflows and environments. AutoDeploy watches the `webapps` directory and deploys applications as they arrive on the filesystem. The Manager application provides an HTTP-based remote deployment interface for both interactive and scripted use. Context descriptor files offer fine-grained control over application configuration, and parallel versioned deployments allow gradual traffic migration without dropping user sessions.
+
+## autoDeploy
+
+The `autoDeploy` feature instructs Tomcat's `HostConfig` listener to periodically scan the `appBase` directory for new or updated WAR files and directories, deploying them automatically. This is the default behavior in a standard Tomcat installation.
+
+The relevant `<Host>` attributes in `conf/server.xml` are:
+
+```xml
+<Host name="localhost"
+      appBase="webapps"
+      unpackWARs="true"
+      autoDeploy="true"
+      deployOnStartup="true">
+  ...
+</Host>
+```
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `appBase` | `webapps` | Directory (relative to `$CATALINA_HOME`) scanned for deployable applications |
+| `autoDeploy` | `true` | Continuously scan `appBase` for new/changed WARs and directories |
+| `deployOnStartup` | `true` | Deploy applications found in `appBase` when Tomcat starts |
+| `unpackWARs` | `true` | Unpack WAR files to directories before serving |
+
+**Context path mapping from filename:**
+
+| Filename | Context Path | Notes |
+|----------|-------------|-------|
+| `ROOT.war` | `/` | The root application |
+| `myapp.war` | `/myapp` | Standard mapping |
+| `myapp##1.0.war` | `/myapp` (version `1.0`) | Parallel deployment version |
+| `api##2.1.war` | `/api` (version `2.1`) | Multiple versions co-exist |
+
+Tomcat checks the `appBase` directory using a background thread. The scan interval is controlled by the `backgroundProcessorDelay` attribute on the `<Engine>` or `<Host>` element (in seconds, default: `10`).
+
+<Warning>
+  `autoDeploy="true"` in a shared or production environment can be a security risk. Anyone with filesystem access to `appBase` can deploy arbitrary code. Set `autoDeploy="false"` and `deployOnStartup="false"` on production servers where deployment should be strictly controlled, and use explicit context descriptors instead.
+</Warning>
+
+## Exploded Directory Deployment
+
+Instead of a WAR archive, you can drop an unpacked application directory directly into `appBase`. The directory is treated identically to a WAR: the same filename-to-context-path rules apply, and Tomcat will hot-pick it up when `autoDeploy="true"`.
+
+```
+webapps/
+├── ROOT/          → deploys to /
+├── myapp/         → deploys to /myapp
+└── api##2.0/      → deploys to /api, version 2.0
+```
+
+Exploded directories are convenient during development because you can overwrite individual class files or static resources without repacking a WAR. For production use, WARs are preferred to ensure atomic, reproducible deployments.
+
+## META-INF/context.xml
+
+An application can bundle its own context configuration by including a `META-INF/context.xml` file inside the WAR or exploded directory. This file uses the same `<Context>` schema as Tomcat's external context descriptors.
+
+```xml
+<!-- META-INF/context.xml -->
+<Context>
+  <Resource name="jdbc/MyDB"
+            auth="Container"
+            type="javax.sql.DataSource"
+            maxTotal="20"
+            maxIdle="10"
+            username="dbuser"
+            password="secret"
+            driverClassName="com.mysql.cj.jdbc.Driver"
+            url="jdbc:mysql://localhost:3306/mydb"/>
+</Context>
+```
+
+<Note>
+  On the **first deployment**, Tomcat copies `META-INF/context.xml` to `conf/Catalina/<hostname>/<appname>.xml` and uses that copy for all subsequent starts. Changes to `META-INF/context.xml` inside the WAR are **not** picked up automatically after the initial copy. To update the context configuration, edit the file in `conf/Catalina/<hostname>/` directly, or undeploy and redeploy the application.
+</Note>
+
+## Static Context Configuration
+
+You can pre-configure an application's context before it is deployed by placing a descriptor file at:
+
+```
+conf/Catalina/<hostname>/<appname>.xml
+```
+
+For example, to pre-configure `/myapp` on `localhost`:
+
+```
+conf/Catalina/localhost/myapp.xml
+```
+
+This file takes priority over any `META-INF/context.xml` inside the application and is never overwritten by Tomcat. A minimal static descriptor looks like:
+
+```xml
+<!-- conf/Catalina/localhost/myapp.xml -->
+<Context docBase="/opt/apps/myapp" reloadable="false">
+  <Resource name="jdbc/AppDS"
+            auth="Container"
+            type="javax.sql.DataSource"
+            url="jdbc:postgresql://db-host/appdb"
+            username="appuser"
+            password="s3cret"
+            driverClassName="org.postgresql.Driver"
+            maxTotal="25"/>
+</Context>
+```
+
+The `docBase` attribute can point outside `appBase`, which is useful when the application files live on a separate volume.
+
+<Tip>
+  Set `reloadable="false"` on production contexts. When `reloadable="true"`, Tomcat polls the application's class files and WEB-INF for changes and triggers a full context restart when it detects modifications. This scanning has non-trivial CPU and I/O overhead, and context restarts briefly interrupt in-flight requests. Use explicit Manager app reloads instead.
+</Tip>
+
+## Deployment via Manager App
+
+The Tomcat Manager application exposes an HTTP text API for deploying WARs directly from the filesystem or by uploading them over HTTP. See [Manager App](/operations/manager-app) for full configuration details.
+
+**Deploy a WAR from a server-side path:**
+
+```bash
+curl -u admin:password \
+  "http://localhost:8080/manager/text/deploy?path=/myapp&war=file:/opt/releases/myapp.war"
+```
+
+**Upload a WAR from the local machine:**
+
+```bash
+curl -u admin:password \
+  -T myapp.war \
+  "http://localhost:8080/manager/text/deploy?path=/myapp"
+```
+
+A successful response looks like:
+
+```
+OK - Deployed application at context path [/myapp]
+```
+
+## Undeploy and Reload
+
+**Undeploy** removes the application from the running server and (if the WAR or directory was deployed via Manager) deletes it from `appBase`:
+
+```bash
+curl -u admin:password \
+  "http://localhost:8080/manager/text/undeploy?path=/myapp"
+```
+
+**Reload** stops and restarts the context, picking up updated class files and configuration without affecting other applications:
+
+```bash
+curl -u admin:password \
+  "http://localhost:8080/manager/text/reload?path=/myapp"
+```
+
+**Stop and Start** (keeps the context registered but stops processing requests):
+
+```bash
+curl -u admin:password "http://localhost:8080/manager/text/stop?path=/myapp"
+curl -u admin:password "http://localhost:8080/manager/text/start?path=/myapp"
+```
+
+## Parallel Deployment (Multiple Versions)
+
+Tomcat supports deploying multiple versions of the same application simultaneously using the `##` version separator in the WAR or directory name:
+
+```
+webapps/myapp##1.0.war   → context path /myapp, version 1.0
+webapps/myapp##2.0.war   → context path /myapp, version 2.0
+```
+
+When both versions are deployed:
+
+- **New sessions** are routed to the highest version number.
+- **Existing sessions** continue to be served by the version they were established against.
+- Old versions are gracefully drained as sessions expire.
+
+This allows zero-downtime upgrades: deploy the new version, wait for old sessions to expire naturally, then undeploy the old version.
+
+```bash
+# Deploy new version alongside the running one
+curl -u admin:password \
+  "http://localhost:8080/manager/text/deploy?path=/myapp&war=file:/releases/myapp##2.0.war"
+
+# Later, undeploy the old version
+curl -u admin:password \
+  "http://localhost:8080/manager/text/undeploy?path=/myapp&version=1.0"
+```
+
+## Application Isolation and Class Loading
+
+Each deployed context receives its own `WebappClassLoader` instance. This means:
+
+- Applications cannot access each other's classes or libraries placed in `WEB-INF/lib`.
+- Different versions of the same library (e.g., different Guava releases) can coexist in separate applications without conflict.
+- Classes are loaded in the order: Bootstrap → System → Common → Webapp (by default).
+
+Shared libraries intended for use across all applications should be placed in `$CATALINA_HOME/lib`. Libraries intended for a single application belong in `WEB-INF/lib`.
+
+For advanced class-loading configuration, including overriding the parent-first delegation model, see [Class Loading](/advanced/class-loading).

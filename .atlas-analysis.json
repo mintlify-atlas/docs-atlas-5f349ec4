@@ -1,0 +1,108 @@
+{
+  "projectType": "framework",
+  "projectName": "Apache Tomcat",
+  "projectDescription": "Apache Tomcat is an open-source implementation of the Jakarta Servlet, Jakarta Pages, Jakarta Expression Language, and Jakarta WebSocket specifications — a production-grade Java web application server.",
+  "theme": "aspen",
+  "primaryColor": "#dcb642",
+  "lightColor": "#6c5411",
+  "darkColor": "#dac47c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/server-xml",
+              "configuration/context",
+              "configuration/connectors",
+              "configuration/environment-variables"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/realms",
+              "security/ssl-tls",
+              "security/authentication"
+            ]
+          },
+          {
+            "group": "Deployment & Operations",
+            "pages": [
+              "operations/deploying-apps",
+              "operations/manager-app",
+              "operations/logging",
+              "operations/clustering"
+            ]
+          },
+          {
+            "group": "Advanced Topics",
+            "pages": [
+              "advanced/embedding",
+              "advanced/valves-filters",
+              "advanced/class-loading",
+              "advanced/websockets"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Jakarta Servlet, Pages (JSP), Expression Language, and WebSocket implementation",
+    "HTTP/1.1 and HTTP/2 protocol support via Coyote connector",
+    "AJP connector for integration with Apache HTTP Server",
+    "SSL/TLS support with JSSE and OpenSSL (via Tomcat Native or FFM API)",
+    "Multiple security realms: JDBC, JNDI, JAAS, UserDatabase, Memory",
+    "Built-in authentication: Basic, Digest, Form, SPNEGO/Kerberos, Certificate",
+    "Session persistence (file, JDBC) and in-memory session management",
+    "Valve pipeline for request/response processing (access logs, RemoteIP, Rate Limiting)",
+    "Built-in filters: CORS, CSRF prevention, security headers, rate limiting",
+    "High-availability clustering with session replication via SimpleTcpCluster",
+    "Embeddable via the org.apache.catalina.startup.Tomcat API",
+    "WAR deployment, hot deployment (autoDeploy), and virtual host support",
+    "JMX management interface and Manager web application"
+  ],
+  "publicApiSurface": [
+    "org.apache.catalina.startup.Tomcat — embedded API",
+    "org.apache.catalina.startup.Bootstrap — standalone startup entry point",
+    "org.apache.catalina.startup.Catalina — server lifecycle management",
+    "org.apache.catalina.Context — web application context interface",
+    "org.apache.catalina.Host — virtual host container interface",
+    "org.apache.catalina.Engine — top-level Catalina container",
+    "org.apache.catalina.Connector — protocol handler binding",
+    "org.apache.catalina.Realm — authentication/authorization SPI",
+    "org.apache.catalina.Valve — pipeline valve interface",
+    "org.apache.catalina.Manager — session manager interface",
+    "org.apache.catalina.LifecycleListener — lifecycle event hook",
+    "org.apache.coyote.ProtocolHandler — HTTP/AJP connector protocol SPI",
+    "org.apache.coyote.http11.Http11NioProtocol — NIO HTTP/1.1 connector",
+    "org.apache.coyote.http2.Http2Protocol — HTTP/2 upgrade protocol",
+    "org.apache.coyote.ajp — AJP connector implementation",
+    "org.apache.catalina.valves.AccessLogValve — access logging valve",
+    "org.apache.catalina.valves.RemoteIpValve — reverse-proxy IP handling",
+    "org.apache.catalina.filters.CorsFilter — CORS request filter",
+    "org.apache.catalina.filters.RateLimitFilter — request rate limiter",
+    "org.apache.catalina.ha.tcp.SimpleTcpCluster — session clustering",
+    "bin/startup.sh / startup.bat — server start scripts",
+    "bin/shutdown.sh / shutdown.bat — server stop scripts",
+    "bin/catalina.sh / catalina.bat — main control script",
+    "bin/digest.sh / digest.bat — password digest utility",
+    "bin/migrate.sh / migrate.bat — configuration migration utility",
+    "conf/server.xml — primary server configuration",
+    "conf/context.xml — default web application context configuration",
+    "conf/web.xml — default servlet/filter configuration",
+    "conf/catalina.properties — class loader configuration",
+    "conf/tomcat-users.xml — user/role database"
+  ]
+}

@@ -1,0 +1,217 @@
+---
+title: "Embedding Apache Tomcat in a Java Application"
+sidebarTitle: "Embedding"
+description: "Use the org.apache.catalina.startup.Tomcat API to embed a servlet container in your Java application. Configure contexts, add servlets, and manage the lifecycle programmatically."
+---
+
+Tomcat provides a minimal embedded API through the `org.apache.catalina.startup.Tomcat` class, allowing you to run a full servlet container inside any Java application without an external server installation. This is the same class used by integration tests in the Tomcat project itself and is well-suited for microservices, self-contained applications, and unit tests.
+
+## Maven Dependencies
+
+Add the embed artifacts to your project. The core module includes the container and HTTP connector; add `tomcat-embed-jasper` only if you need JSP support.
+
+```xml pom.xml
+<dependency>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-core</artifactId>
+    <version>11.0.x</version>
+</dependency>
+
+<!-- Optional: JSP support -->
+<dependency>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-jasper</artifactId>
+    <version>11.0.x</version>
+</dependency>
+
+<!-- Optional: WebSocket support -->
+<dependency>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-websocket</artifactId>
+    <version>11.0.x</version>
+</dependency>
+```
+
+## Minimal Embedded Server
+
+The following example starts an HTTP server on port 8080 with a single servlet that responds "Hello, World!" to all requests.
+
+```java EmbeddedTomcat.java lines
+import org.apache.catalina.Context;
+import org.apache.catalina.startup.Tomcat;
+
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.File;
+import java.io.IOException;
+
+public class EmbeddedTomcat {
+    public static void main(String[] args) throws Exception {
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(8080);
+
+        // Must call getConnector() to trigger connector initialization
+        tomcat.getConnector();
+
+        // Add a context with an empty context path (root app)
+        Context ctx = tomcat.addContext("", new File(".").getAbsolutePath());
+
+        // Add a servlet to the context
+        Tomcat.addServlet(ctx, "hello", new HttpServlet() {
+            @Override
+            protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+                    throws IOException {
+                resp.setContentType("text/plain");
+                resp.getWriter().println("Hello, World!");
+            }
+        });
+        ctx.addServletMappingDecoded("/*", "hello");
+
+        // Start the server and wait
+        tomcat.start();
+        tomcat.getServer().await();
+    }
+}
+```
+
+<Note>
+  Calling `tomcat.getConnector()` before `tomcat.start()` is required. It initializes the default HTTP connector on the port set by `setPort()`. Without this call, no connector is created and no requests will be served.
+</Note>
+
+## Adding a WAR File
+
+Use `addWebapp()` to deploy an existing WAR file or exploded directory. This method processes `WEB-INF/web.xml`, `META-INF/context.xml`, and all `ServletContainerInitializer` services, exactly as a standard deployment would.
+
+```java
+Context ctx = tomcat.addWebapp("/myapp", "/absolute/path/to/myapp.war");
+```
+
+To deploy the ROOT context:
+
+```java
+Context root = tomcat.addWebapp("", "/absolute/path/to/ROOT.war");
+```
+
+## Configuring SSL
+
+Add an SSL connector programmatically using the standard `Connector` and `SSLHostConfig` APIs:
+
+```java SslEmbeddedTomcat.java lines
+import org.apache.catalina.connector.Connector;
+import org.apache.coyote.http11.Http11NioProtocol;
+import org.apache.tomcat.util.net.SSLHostConfig;
+import org.apache.tomcat.util.net.SSLHostConfigCertificate;
+
+Connector sslConnector = new Connector(Http11NioProtocol.class.getName());
+sslConnector.setPort(8443);
+sslConnector.setSecure(true);
+sslConnector.setScheme("https");
+sslConnector.setProperty("SSLEnabled", "true");
+
+SSLHostConfig sslHostConfig = new SSLHostConfig();
+SSLHostConfigCertificate cert = new SSLHostConfigCertificate(
+    sslHostConfig, SSLHostConfigCertificate.Type.RSA);
+cert.setCertificateKeystoreFile("/path/to/keystore.jks");
+cert.setCertificateKeystorePassword("changeit");
+sslHostConfig.addCertificate(cert);
+sslConnector.addSslHostConfig(sslHostConfig);
+
+tomcat.getService().addConnector(sslConnector);
+```
+
+## Lifecycle Management
+
+`Tomcat` implements the `Lifecycle` interface. The main lifecycle methods are:
+
+| Method | Description |
+|--------|-------------|
+| `tomcat.start()` | Start the server; begins accepting connections |
+| `tomcat.stop()` | Stop the server gracefully |
+| `tomcat.destroy()` | Release all resources after stopping |
+| `tomcat.getServer().await()` | Block the calling thread until the server receives a shutdown command |
+
+Listen for lifecycle events using a `LifecycleListener`:
+
+```java
+tomcat.getServer().addLifecycleListener(event -> {
+    if (Lifecycle.AFTER_START_EVENT.equals(event.getType())) {
+        System.out.println("Server started on port " + tomcat.getConnector().getPort());
+    }
+});
+tomcat.start();
+```
+
+## Key API Methods
+
+| Method | Description |
+|--------|-------------|
+| `setPort(int port)` | Set the HTTP connector port (default: 8080) |
+| `setBaseDir(String basedir)` | Set the work directory (default: user.dir/tomcat.$PORT) |
+| `setHostname(String hostname)` | Set the default hostname (default: localhost) |
+| `addContext(String contextPath, String docBase)` | Create a bare Context without web.xml processing |
+| `addWebapp(String contextPath, String docBase)` | Create a Context with full web.xml and SCI processing |
+| `addServlet(Context ctx, String name, Servlet servlet)` | Register a servlet instance in a context |
+| `getConnector()` | Get/initialize the default HTTP connector |
+| `getHost()` | Get the default `StandardHost` |
+| `getEngine()` | Get the default `StandardEngine` |
+| `getServer()` | Get the `Server` instance |
+| `start()` / `stop()` / `destroy()` | Manage server lifecycle |
+
+## Unit Testing with Embedded Tomcat
+
+Embedded Tomcat is commonly used for integration tests. Use a random port to avoid conflicts:
+
+```java TomcatIntegrationTest.java lines
+import org.junit.jupiter.api.*;
+import org.apache.catalina.startup.Tomcat;
+import java.net.ServerSocket;
+
+class MyServletIntegrationTest {
+
+    private static Tomcat tomcat;
+    private static int port;
+
+    @BeforeAll
+    static void startServer() throws Exception {
+        // Find a free port
+        try (ServerSocket s = new ServerSocket(0)) {
+            port = s.getLocalPort();
+        }
+
+        tomcat = new Tomcat();
+        tomcat.setPort(port);
+        tomcat.getConnector();
+
+        Context ctx = tomcat.addContext("", System.getProperty("java.io.tmpdir"));
+        Tomcat.addServlet(ctx, "myServlet", new MyServlet());
+        ctx.addServletMappingDecoded("/api/*", "myServlet");
+
+        tomcat.start();
+    }
+
+    @AfterAll
+    static void stopServer() throws Exception {
+        tomcat.stop();
+        tomcat.destroy();
+    }
+
+    @Test
+    void testMyEndpoint() throws Exception {
+        // Test against http://localhost:{port}/api/...
+    }
+}
+```
+
+<Tip>
+  For production microservices, consider Spring Boot or Quarkus instead — they provide embedded Tomcat with opinionated defaults, auto-configuration, and production-readiness features built in. The embedded Tomcat API is best suited for lightweight tools and test harnesses.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Valves & Filters" icon="filter" href="/advanced/valves-filters">
+    Add request processing pipeline components to embedded and standalone Tomcat.
+  </Card>
+  <Card title="WebSockets" icon="plug" href="/advanced/websockets">
+    Add WebSocket endpoints to your embedded Tomcat application.
+  </Card>
+</CardGroup>

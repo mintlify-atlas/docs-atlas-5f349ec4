@@ -1,0 +1,212 @@
+---
+title: "Tomcat Manager Application Reference"
+sidebarTitle: "Manager App"
+description: "Use the Tomcat Manager web app to deploy, undeploy, start, stop, and monitor web applications via browser UI or HTTP text API. Configure access roles and remote deployment."
+---
+
+The Manager application ships with every Tomcat installation and provides both a browser-based HTML interface and a machine-readable text HTTP API for managing deployed web applications. It allows operators to deploy new applications, stop or reload running ones, inspect session counts, and collect diagnostics — all without restarting Tomcat. The Manager itself is deployed as a privileged web application at `/manager` and relies on Tomcat's security framework to restrict access.
+
+## Enabling the Manager
+
+The Manager application is included in the default Tomcat distribution under `webapps/manager`, but it ships with no authorized users. You must add user entries to `conf/tomcat-users.xml` before you can log in.
+
+There are four distinct Manager roles, each granting access to a different interface:
+
+| Role | Access Granted |
+|------|---------------|
+| `manager-gui` | HTML browser interface at `/manager/html` |
+| `manager-script` | Text (machine-readable) HTTP API at `/manager/text` |
+| `manager-jmx` | JMX proxy at `/manager/jmxproxy` |
+| `manager-status` | Server status pages at `/manager/status` |
+
+Add role and user entries to `conf/tomcat-users.xml`:
+
+```xml
+<tomcat-users>
+  <role rolename="manager-gui"/>
+  <role rolename="manager-script"/>
+  <role rolename="manager-status"/>
+
+  <!-- Browser-only operator -->
+  <user username="admin"
+        password="str0ngP@ssw0rd!"
+        roles="manager-gui,manager-status"/>
+
+  <!-- CI/CD automation account (no GUI needed) -->
+  <user username="deploy-bot"
+        password="c1Dep10yS3cr3t"
+        roles="manager-script"/>
+</tomcat-users>
+```
+
+<Warning>
+  The Manager application is a high-value attack target. Use strong, unique passwords for every Manager account. Never use the default `tomcat`/`tomcat` credentials in any environment. Prefer `manager-script` accounts for automation and limit `manager-gui` access to named individuals. Rotate credentials regularly and audit `conf/tomcat-users.xml` as part of your security review process.
+</Warning>
+
+## Remote Access Configuration
+
+By default, Tomcat restricts Manager access to connections originating from `localhost` (127.0.0.1 and ::1). This is enforced by a `RemoteAddrValve` in the context descriptor at `conf/Catalina/localhost/manager.xml`.
+
+**Default `conf/Catalina/localhost/manager.xml`:**
+
+```xml
+<Context antiResourceLocking="false" privileged="true">
+  <CookieProcessor className="org.apache.tomcat.util.http.Rfc6265CookieProcessor"
+                   sameSiteCookies="strict" />
+  <Valve className="org.apache.catalina.valves.RemoteAddrValve"
+         allow="127\.\d+\.\d+\.\d+|::1|0:0:0:0:0:0:0:1"/>
+  <Manager sessionAttributeValueClassNameFilter="java\.lang\.
+(?:Boolean|Integer|Long|Number|String)|org\.apache\.catalina\.filters\.
+CsrfPreventionFilter\$LruCache(?:\$1)?|java\.util\.(?:Linked)?HashMap"/>
+</Context>
+```
+
+To allow access from an internal network (e.g., `192.168.1.0/24`), extend the `allow` regex:
+
+```xml
+<Valve className="org.apache.catalina.valves.RemoteAddrValve"
+       allow="127\.\d+\.\d+\.\d+|::1|0:0:0:0:0:0:0:1|192\.168\.1\.\d+"/>
+```
+
+For access from any address on a secured network, replace the `allow` attribute with a permissive pattern — but only do this behind a firewall or VPN:
+
+```xml
+<Valve className="org.apache.catalina.valves.RemoteAddrValve"
+       allow=".*"/>
+```
+
+## HTML Manager Interface
+
+Navigate to `http://localhost:8080/manager/html` in a browser and authenticate with a `manager-gui` account. The HTML interface provides:
+
+- A table of all deployed applications showing context path, display name, running state, and active session count.
+- Per-application action buttons: **Start**, **Stop**, **Reload**, **Undeploy**, and **Expire Sessions**.
+- A deploy panel for uploading a WAR file from your local machine or specifying a server-side path.
+- Links to the Server Status page and the application session detail views.
+
+The HTML interface is served by `HTMLManagerServlet`, which extends `ManagerServlet` and renders the same underlying operations as formatted HTML rather than plain text responses.
+
+## Text API Commands
+
+The text API is available at `/manager/text/` and is designed for scripted access. Every response begins with `OK -` on success or `FAIL -` on error, making it easy to parse from shell scripts or CI/CD pipelines.
+
+### Endpoint Reference
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/manager/text/list` | GET | List all deployed applications with path, status, and session count |
+| `/manager/text/deploy?path=&war=` | GET | Deploy a WAR from a `file:` or `jar:` URL on the server filesystem |
+| `/manager/text/deploy?path=` | PUT | Upload and deploy a WAR from the request body |
+| `/manager/text/undeploy?path=` | GET | Undeploy the application at the given path and remove it from `appBase` |
+| `/manager/text/start?path=` | GET | Start a previously stopped application |
+| `/manager/text/stop?path=` | GET | Stop a running application (keeps it registered) |
+| `/manager/text/reload?path=` | GET | Reload the application (stop + start the context) |
+| `/manager/text/sessions?path=` | GET | Display session count and inactivity distribution |
+| `/manager/text/expire?path=&idle=` | GET | Expire sessions idle for more than `idle` minutes |
+| `/manager/text/findleaks` | GET | Find applications that triggered memory leaks on previous reload/undeploy |
+| `/manager/text/serverinfo` | GET | Display Tomcat version, OS, JVM, and hostname |
+| `/manager/text/vminfo` | GET | Detailed JVM memory, GC, and thread pool information |
+| `/manager/text/threaddump` | GET | Full JVM thread dump |
+| `/manager/text/save` | GET | Save current server configuration to `server.xml` |
+| `/manager/text/save?path=` | GET | Save a context's configuration to `conf/Catalina/<host>/<app>.xml` |
+
+### curl Examples
+
+**List all deployed applications:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  http://localhost:8080/manager/text/list
+```
+
+Example output:
+```
+OK - Listed applications for virtual host [localhost]
+/:running:0:ROOT
+/manager:running:1:manager
+/myapp:running:42:myapp
+/oldapp:stopped:0:oldapp
+```
+
+**Deploy a WAR from the server filesystem:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/deploy?path=/myapp&war=file:/opt/releases/myapp-2.1.war"
+```
+
+**Upload a WAR from your local machine (PUT):**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  -T target/myapp.war \
+  "http://localhost:8080/manager/text/deploy?path=/myapp"
+```
+
+**Undeploy an application:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/undeploy?path=/myapp"
+```
+
+**Reload a running application:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/reload?path=/myapp"
+```
+
+**Expire sessions idle for more than 30 minutes:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/expire?path=/myapp&idle=30"
+```
+
+**Find memory-leaking applications:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/findleaks"
+```
+
+**Capture a thread dump for troubleshooting:**
+
+```bash
+curl -u deploy-bot:c1Dep10yS3cr3t \
+  "http://localhost:8080/manager/text/threaddump"
+```
+
+<Note>
+  Use `path=/` (not `path=`) to target the ROOT context. For example: `curl ".../manager/text/stop?path=/"`.
+</Note>
+
+## Status App
+
+The Status application at `/manager/status` (also accessible as `/manager/status/all` for extended output) provides a real-time server health overview. It requires only the `manager-status` role, making it safe to grant to monitoring systems.
+
+The status page displays:
+
+<CardGroup cols={2}>
+  <Card title="JVM Memory" icon="memory">
+    Heap usage, non-heap, and individual memory pool statistics from the running JVM.
+  </Card>
+  <Card title="Thread Pools" icon="layer-group">
+    Current thread count, maximum threads, and queue depth for each Connector's executor.
+  </Card>
+  <Card title="Connector Statistics" icon="arrow-right-arrow-left">
+    Request count, error count, bytes sent/received, and processing time per Connector.
+  </Card>
+  <Card title="JVM Version Info" icon="circle-info">
+    Tomcat version, Java version, OS name/version/architecture, and hostname.
+  </Card>
+</CardGroup>
+
+The status page is available in both HTML format (browser) and XML format for machine consumption:
+
+```bash
+# XML format for monitoring tools
+curl -u admin:str0ngP@ssw0rd! \
+  "http://localhost:8080/manager/status/all?XML=true"
+```

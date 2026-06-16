@@ -1,0 +1,218 @@
+---
+title: "HTTP/1.1, HTTP/2, and AJP Connector Configuration"
+sidebarTitle: "Connectors"
+description: "Configure Tomcat's HTTP/1.1 NIO, HTTP/2, and AJP connectors. Set thread pools, timeouts, compression, and SSL. Covers Executor configuration for shared thread pools."
+---
+
+Tomcat's Coyote layer provides the network I/O infrastructure that sits in front of the Catalina servlet engine. Each `<Connector>` element in `server.xml` binds a TCP port and a protocol implementation to the container hierarchy. Tomcat ships with three connector types: HTTP/1.1 (NIO), HTTP/2 (as an upgrade from HTTP/1.1), and AJP for reverse-proxy integrations. All connectors live inside a `<Service>` element and share the same `<Engine>`.
+
+## HTTP/1.1 NIO Connector
+
+The default and most commonly used connector. When `protocol="HTTP/1.1"` is specified (the default), Tomcat resolves it to `org.apache.coyote.http11.Http11NioProtocol` — a non-blocking I/O implementation built on Java NIO.
+
+```xml
+<Connector port="8080" protocol="HTTP/1.1"
+           connectionTimeout="20000"
+           redirectPort="8443" />
+```
+
+### Attribute Reference
+
+| Attribute | Default | Description |
+|---|---|---|
+| `port` | — | TCP port to bind. Required. Common values: `8080` (HTTP), `8443` (HTTPS). |
+| `protocol` | `HTTP/1.1` | Protocol handler. `HTTP/1.1` resolves to `Http11NioProtocol`. You can also specify the fully-qualified class name directly. |
+| `connectionTimeout` | `20000` | Milliseconds to wait for the client to send the request URI line after the TCP connection is accepted. |
+| `redirectPort` | `443` | Port used when a `<security-constraint>` in `web.xml` triggers an HTTP→HTTPS redirect. |
+| `maxThreads` | `200` | Maximum number of simultaneous request-processing threads in the internal thread pool. Requests beyond this limit queue up to `acceptCount`. |
+| `minSpareThreads` | `10` | Minimum number of idle threads kept alive in the pool at all times. |
+| `acceptCount` | `100` | Length of the OS-level accept queue when all `maxThreads` are busy. Connections beyond this are refused. |
+| `maxConnections` | `8192` | Maximum number of open socket connections accepted at the OS level. NIO can sustain far more connections than threads. |
+| `keepAliveTimeout` | `connectionTimeout` | Milliseconds to wait for a subsequent request on a keep-alive connection before closing it. |
+| `maxKeepAliveRequests` | `100` | Maximum number of HTTP requests handled on a single keep-alive connection before closing it. Set to `1` to disable keep-alive. |
+| `compression` | `off` | Enable HTTP response compression. Values: `off`, `on` (compress text types when size ≥ `compressionMinSize`), `force` (always compress). |
+| `compressionMinSize` | `2048` | Minimum response body size in bytes before compression is applied. Only relevant when `compression="on"`. |
+| `compressibleMimeType` | `text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml` | Comma-separated list of MIME types eligible for compression. |
+| `URIEncoding` | `UTF-8` | Character encoding used to decode percent-encoded URI bytes. |
+| `maxHttpHeaderSize` | `8192` | Maximum size in bytes of the HTTP request and response header. |
+| `maxPostSize` | `2097152` | Maximum size in bytes of a POST request body (2 MB default). Set to `-1` for unlimited. |
+
+### Full Example with Compression
+
+```xml
+<Connector port="8080" protocol="HTTP/1.1"
+           connectionTimeout="20000"
+           redirectPort="8443"
+           maxThreads="300"
+           minSpareThreads="25"
+           acceptCount="200"
+           maxConnections="10000"
+           keepAliveTimeout="15000"
+           maxKeepAliveRequests="200"
+           compression="on"
+           compressionMinSize="1024"
+           compressibleMimeType="text/html,text/xml,text/plain,text/css,application/json,application/javascript"
+           URIEncoding="UTF-8"
+           maxHttpHeaderSize="16384" />
+```
+
+## HTTP/2 Support
+
+HTTP/2 is enabled by nesting an `<UpgradeProtocol>` element inside a TLS-enabled HTTP/1.1 Connector. Tomcat negotiates HTTP/2 via ALPN (Application-Layer Protocol Negotiation) during the TLS handshake. Plaintext HTTP/2 (h2c via the `Upgrade` header) is also supported but rarely used in production.
+
+<Note>
+  HTTP/2 requires an SSL-enabled Connector because all major browsers only implement HTTP/2 over TLS. The `<UpgradeProtocol>` element must be a **child** of the `<Connector>`, not a sibling.
+</Note>
+
+```xml
+<Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="150" SSLEnabled="true">
+
+    <!-- Enable HTTP/2 via ALPN -->
+    <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+
+    <SSLHostConfig>
+        <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                     certificateKeystorePassword="changeit"
+                     type="RSA" />
+    </SSLHostConfig>
+</Connector>
+```
+
+Key `Http2Protocol` settings (all timeouts in milliseconds):
+
+| Attribute | Default | Description |
+|---|---|---|
+| `readTimeout` | `5000` | Socket-level read timeout. |
+| `writeTimeout` | `5000` | Socket-level write timeout. |
+| `keepAliveTimeout` | `20000` | Connection-level keep-alive timeout. |
+| `maxConcurrentStreams` | `100` | Maximum number of concurrent HTTP/2 streams per connection. |
+| `maxConcurrentStreamExecution` | `20` | Maximum streams actively executing (threads) per connection at one time. |
+
+## AJP Connector
+
+The AJP (Apache JServ Protocol) connector enables Tomcat to receive pre-processed requests from a front-end web server such as Apache httpd using `mod_proxy_ajp` or `mod_jk`. AJP is a binary protocol with lower overhead than plain HTTP proxying.
+
+<Warning>
+  The AJP connector is **commented out by default** and should remain disabled unless you are intentionally running Tomcat behind an Apache httpd reverse proxy. When enabled, bind it to the loopback interface (`address="::1"` for IPv6 or `address="127.0.0.1"` for IPv4) and never expose port 8009 publicly. The **`secretRequired`** attribute must be configured when `address` is set to a non-loopback address.
+</Warning>
+
+```xml
+<Connector protocol="AJP/1.3"
+           address="::1"
+           port="8009"
+           redirectPort="8443" />
+```
+
+For non-loopback addresses, add a shared secret to authenticate the proxy:
+
+```xml
+<Connector protocol="AJP/1.3"
+           address="10.0.0.5"
+           port="8009"
+           secret="myAjpSecret"
+           secretRequired="true"
+           redirectPort="8443" />
+```
+
+AJP connector attributes:
+
+| Attribute | Default | Description |
+|---|---|---|
+| `port` | `8009` | TCP port for AJP connections. |
+| `address` | All interfaces | IP address to bind. Always set to `::1` (IPv6 loopback) or `127.0.0.1` (IPv4 loopback) in production. |
+| `secret` | — | Shared secret string that the front-end proxy must send. Required when `secretRequired="true"`. |
+| `secretRequired` | `true` | When `true`, Tomcat refuses AJP connections that do not provide the correct `secret`. Disable only in fully trusted network segments. |
+| `packetSize` | `8192` | Maximum AJP packet size in bytes. Must match the corresponding setting in `mod_proxy_ajp`. Max is `65536`. |
+| `connectionTimeout` | `60000` | Milliseconds to wait for an AJP packet from the front-end server. |
+
+## Shared Thread Pool (Executor)
+
+By default, each Connector creates and manages its own internal thread pool. When you have multiple connectors (for example, HTTP on port 8080 and HTTPS on port 8443), you can share a single thread pool between them using a named `<Executor>`.
+
+Define the `<Executor>` **before** any Connectors inside `<Service>`, then reference it by name in each Connector via the `executor` attribute:
+
+```xml
+<Service name="Catalina">
+
+  <!-- Shared thread pool -->
+  <Executor name="tomcatThreadPool"
+            namePrefix="catalina-exec-"
+            maxThreads="200"
+            minSpareThreads="20"
+            maxQueueSize="100" />
+
+  <!-- HTTP connector using the shared pool -->
+  <Connector executor="tomcatThreadPool"
+             port="8080" protocol="HTTP/1.1"
+             connectionTimeout="20000"
+             redirectPort="8443" />
+
+  <!-- HTTPS connector using the same shared pool -->
+  <Connector executor="tomcatThreadPool"
+             port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+             SSLEnabled="true"
+             connectionTimeout="20000"
+             redirectPort="8443">
+    <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+    <SSLHostConfig>
+      <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                   certificateKeystorePassword="changeit" type="RSA" />
+    </SSLHostConfig>
+  </Connector>
+
+  <Engine name="Catalina" defaultHost="localhost">
+    ...
+  </Engine>
+</Service>
+```
+
+`<Executor>` attribute reference:
+
+| Attribute | Default | Description |
+|---|---|---|
+| `name` | — | Unique name for this executor, referenced by `executor` on Connectors. Required. |
+| `namePrefix` | `tomcat-exec-` | Prefix applied to the names of threads created by this pool. |
+| `maxThreads` | `200` | Maximum number of active threads in the pool. |
+| `minSpareThreads` | `25` | Minimum number of idle threads kept alive. |
+| `maxQueueSize` | `Integer.MAX_VALUE` | Maximum size of the task queue. Tasks beyond this limit are rejected. |
+| `threadPriority` | `Thread.NORM_PRIORITY` | Priority of threads in the pool (`1`–`10`). |
+| `daemon` | `true` | Whether pool threads are daemon threads. |
+
+<Note>
+  When a Connector references an `<Executor>`, the `maxThreads`, `minSpareThreads`, and other thread-pool attributes on the `<Connector>` element itself are ignored. All threading is controlled by the `<Executor>`.
+</Note>
+
+## SSL/TLS Configuration
+
+SSL/TLS is configured via `SSLEnabled="true"` and a nested `<SSLHostConfig>` element on the Connector. Tomcat supports both JSSE (Java keystore-based) and OpenSSL (via the Tomcat Native/APR library or the Java 22 FFM API) certificate configurations.
+
+The following shows the commented-out SSL connector from the default `server.xml`, ready to uncomment and adapt:
+
+```xml
+<Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="150" SSLEnabled="true">
+    <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+    <SSLHostConfig>
+        <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                     certificateKeystorePassword="changeit"
+                     type="RSA" />
+    </SSLHostConfig>
+</Connector>
+```
+
+For PEM-based certificates (OpenSSL style, usable with JSSE as well):
+
+```xml
+<Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="150" SSLEnabled="true">
+    <SSLHostConfig>
+        <Certificate certificateFile="conf/server.crt"
+                     certificateKeyFile="conf/server.key"
+                     certificateChainFile="conf/chain.pem"
+                     type="RSA" />
+    </SSLHostConfig>
+</Connector>
+```
+
+For detailed SSL/TLS protocol selection, cipher configuration, and certificate management, see the dedicated SSL/TLS guide.

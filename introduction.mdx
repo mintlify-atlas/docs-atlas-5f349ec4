@@ -1,0 +1,112 @@
+---
+title: "Apache Tomcat: Architecture and Core Concepts"
+sidebarTitle: "Introduction"
+description: "Learn how Apache Tomcat implements the Jakarta Servlet, JSP, EL, and WebSocket specs. Understand its container hierarchy, connectors, and lifecycle."
+---
+
+Apache Tomcat is an open-source web application server that provides a pure-Java implementation of the Jakarta Servlet, Jakarta Pages (JSP), Jakarta Expression Language (EL), and Jakarta WebSocket specifications. Maintained by the Apache Software Foundation, Tomcat powers numerous large-scale, mission-critical web applications across industries worldwide. Unlike a full Jakarta EE application server, Tomcat focuses on the servlet container layer — giving teams a lightweight, highly configurable runtime for deploying Java web applications without the overhead of a complete enterprise platform.
+
+## Component Architecture
+
+Tomcat's internal structure is organized as a strict containment hierarchy. Each level in the hierarchy is responsible for a narrower scope of request processing, from the top-level server process down to individual servlet wrappers. Understanding this hierarchy is essential for reading `conf/server.xml` and tuning Tomcat for production.
+
+| Component | Class | Responsibility |
+|-----------|-------|----------------|
+| **Server** | `org.apache.catalina.core.StandardServer` | Represents the entire Tomcat JVM process. Listens on a shutdown port (default `8005`) and owns one or more Services. |
+| **Service** | `org.apache.catalina.core.StandardService` | Groups one or more Connectors with a single Engine. The default service is named `Catalina`. |
+| **Engine** | `org.apache.catalina.core.StandardEngine` | The top-level servlet container inside a Service. Routes incoming requests to the correct Host based on the `Host` header. |
+| **Host** | `org.apache.catalina.core.StandardHost` | Represents a virtual host (e.g., `localhost`). Its `appBase` attribute (default `webapps`) is the directory scanned for web applications. |
+| **Context** | `org.apache.catalina.core.StandardContext` | Represents a single web application. Maps to a URL path (e.g., `/myapp`). Manages the web application's classloader, servlet registrations, and lifecycle. |
+| **Wrapper** | `org.apache.catalina.core.StandardWrapper` | Wraps an individual `jakarta.servlet.Servlet` instance inside a Context. Manages servlet initialization, invocation, and destruction. |
+
+The nested structure maps directly to the XML layout of `conf/server.xml`:
+
+```xml
+<Server port="8005" shutdown="SHUTDOWN">          <!-- StandardServer  -->
+  <Service name="Catalina">                        <!-- StandardService -->
+    <Connector port="8080" protocol="HTTP/1.1" />  <!-- Coyote Connector -->
+
+    <Engine name="Catalina" defaultHost="localhost"> <!-- StandardEngine -->
+      <Host name="localhost" appBase="webapps"       <!-- StandardHost   -->
+            unpackWARs="true" autoDeploy="true">
+        <!-- Context elements (one per web app)      <!-- StandardContext -->
+        <!-- Wrapper elements live inside Contexts   <!-- StandardWrapper -->
+      </Host>
+    </Engine>
+  </Service>
+</Server>
+```
+
+<Note>
+  A `Server` is **not** a `Container`, and neither is a `Service`. Valves — pipeline components that intercept requests — can only be attached at the `Engine`, `Host`, `Context`, and `Wrapper` levels.
+</Note>
+
+## Catalina, Coyote, and Jasper
+
+Tomcat is built from three distinct subsystems that collaborate on every request:
+
+**Catalina** is the servlet container engine at Tomcat's core. The `org.apache.catalina.startup.Catalina` class parses `conf/server.xml`, constructs the component hierarchy, and manages the `Server` lifecycle. The entry point for all Tomcat startups is `org.apache.catalina.startup.Bootstrap`, which initializes the three-tier classloader hierarchy (`common`, `server`, `shared`) before handing off to `Catalina`.
+
+**Coyote** is the connector framework that handles network I/O. It provides HTTP/1.1, HTTP/2, and AJP protocol implementations. Each `<Connector>` element in `server.xml` corresponds to a Coyote endpoint. Coyote is responsible for accepting TCP connections, parsing raw HTTP bytes into `Request` objects, and writing `Response` objects back to the wire. It is completely decoupled from the servlet API — the `org.apache.catalina.connector.CoyoteAdapter` bridges Coyote's protocol-level objects into Catalina's `HttpServletRequest`/`HttpServletResponse` types.
+
+**Jasper** is Tomcat's JSP engine. It compiles `.jsp` and `.jspx` source files into Java servlet classes at request time (or at deployment time if precompilation is configured). Jasper implements the Jakarta Pages specification and integrates with Catalina's classloader so that recompiled JSPs are hot-reloaded without restarting the application.
+
+## The Lifecycle Model
+
+Every major Tomcat component — `Server`, `Service`, `Engine`, `Host`, `Context`, `Wrapper`, and connectors — implements the `org.apache.catalina.Lifecycle` interface. This interface defines a uniform state machine and an event notification mechanism so that components can be started, stopped, and destroyed in a coordinated way.
+
+A component transitions through the following states in order:
+
+```
+NEW → INITIALIZING → INITIALIZED → STARTING_PREP → STARTING → STARTED
+                                                                    ↓
+DESTROYED ← DESTROYING ← STOPPED ← STOPPING ← STOPPING_PREP ←────┘
+```
+
+The `FAILED` state can be entered from `STARTING` or `STOPPING` if an unrecoverable error occurs. Once in `FAILED`, the component may transition to `STOPPING_PREP` for cleanup, or directly to `DESTROYED`.
+
+External code observes these transitions by registering a `LifecycleListener`:
+
+```java
+// Register a custom listener on the Server
+server.addLifecycleListener(event -> {
+    if (Lifecycle.START_EVENT.equals(event.getType())) {
+        System.out.println("Server started: " + event.getSource());
+    }
+});
+```
+
+Tomcat's own `conf/server.xml` ships with several built-in listeners attached to the `<Server>` element:
+
+```xml
+<Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+<Listener className="org.apache.catalina.core.AprLifecycleListener" />
+<Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+<Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />
+<Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+```
+
+## Key Specifications Supported
+
+Tomcat implements the following Jakarta EE specifications. Each major Tomcat release targets a specific generation of these APIs:
+
+| Specification | Version | Description |
+|---------------|---------|-------------|
+| Jakarta Servlet | 6.x | Core request/response API, filters, and async processing for Java web applications |
+| Jakarta Pages (JSP) | 4.x | Server-side page templating compiled to servlets by the Jasper engine |
+| Jakarta Expression Language (EL) | 6.x | Lightweight expression language used in JSP, JSF, and CDI contexts |
+| Jakarta WebSocket | 2.2 | Full-duplex, bidirectional communication channel over a single TCP connection |
+| Jakarta Authentication (JASPIC) | 3.x | Pluggable authentication module SPI for web and EJB security |
+
+<Note>
+  Tomcat 10.x and later use the `jakarta.*` package namespace introduced with Jakarta EE 9. Applications built against the older `javax.*` namespace (Java EE 8 and earlier) must be migrated or run on Tomcat 9.x. The `webapps-javaee` directory in newer Tomcat releases provides a migration-assist path.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Download Tomcat, configure environment variables, and deploy your first web application in under five minutes.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/configuration/server-xml">
+    Deep-dive into every element of `conf/server.xml`, including Connectors, Realms, Valves, and Executors.
+  </Card>
+</CardGroup>

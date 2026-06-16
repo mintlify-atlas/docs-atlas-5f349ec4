@@ -1,0 +1,354 @@
+---
+title: "Web Application Authentication in Apache Tomcat"
+sidebarTitle: "Authentication"
+description: "Configure BASIC, DIGEST, FORM, SPNEGO, and CLIENT-CERT authentication for Tomcat web applications. Includes Single Sign-On valve and JASPIC integration."
+---
+
+Tomcat implements authentication through the **Authenticator Valve** mechanism. Each authentication method (`BASIC`, `DIGEST`, `FORM`, `SPNEGO`, `CLIENT-CERT`) maps to a concrete `AuthenticatorBase` subclass in the `org.apache.catalina.authenticator` package. The method is declared in the web application's `WEB-INF/web.xml` inside a `<login-config>` element, and Tomcat automatically installs the corresponding Authenticator valve when the context starts — no manual valve configuration is needed for standard methods.
+
+---
+
+## Declaring Authentication in web.xml
+
+Every protected web application needs two declarations in `WEB-INF/web.xml`: a `<login-config>` that specifies the authentication method, and one or more `<security-constraint>` elements that define which URL patterns require authentication and which roles are permitted.
+
+**`<login-config>` skeleton:**
+
+```xml
+<login-config>
+  <auth-method>BASIC</auth-method>          <!-- BASIC | DIGEST | FORM | SPNEGO | CLIENT-CERT -->
+  <realm-name>My Application</realm-name>   <!-- Displayed in browser dialogs -->
+</login-config>
+```
+
+**`<security-constraint>` protecting a URL pattern:**
+
+```xml
+<security-constraint>
+  <display-name>Protected Admin Area</display-name>
+  <web-resource-collection>
+    <web-resource-name>Admin Pages</web-resource-name>
+    <url-pattern>/admin/*</url-pattern>
+    <http-method>GET</http-method>
+    <http-method>POST</http-method>
+  </web-resource-collection>
+  <auth-constraint>
+    <role-name>admin</role-name>
+    <role-name>manager</role-name>
+  </auth-constraint>
+</security-constraint>
+
+<!-- Declare all roles referenced above -->
+<security-role>
+  <role-name>admin</role-name>
+</security-role>
+<security-role>
+  <role-name>manager</role-name>
+</security-role>
+```
+
+Omitting `<http-method>` restricts all HTTP methods. Using `<http-method-omission>` instead protects every method *except* the listed ones.
+
+---
+
+## BASIC Authentication
+
+BASIC authentication is implemented by `BasicAuthenticator` (RFC 7617). When a request arrives for a protected resource without credentials, Tomcat returns a `401 Unauthorized` response with a `WWW-Authenticate: Basic realm="..."` header. The browser displays a native login dialog and retransmits the request with an `Authorization: Basic <base64(user:password)>` header.
+
+```xml
+<login-config>
+  <auth-method>BASIC</auth-method>
+  <realm-name>My Application</realm-name>
+</login-config>
+```
+
+The `BasicAuthenticator` source shows it decodes the Base64 header using either UTF-8 (default) or ISO-8859-1 depending on the configurable `charset` property.
+
+<Warning>
+BASIC authentication encodes credentials in Base64, which is **not** encryption. Anyone who intercepts the HTTP exchange can trivially decode the username and password. Always use BASIC authentication exclusively over HTTPS (`<transport-guarantee>CONFIDENTIAL</transport-guarantee>`).
+</Warning>
+
+---
+
+## DIGEST Authentication
+
+DIGEST authentication is implemented by `DigestAuthenticator` (RFC 7616). Instead of transmitting the password, it uses a challenge-response mechanism: the server sends a `nonce`, and the client computes an MD5 (or SHA-256 with RFC 7616) hash of the credentials combined with the nonce.
+
+```xml
+<login-config>
+  <auth-method>DIGEST</auth-method>
+  <realm-name>My Application</realm-name>
+</login-config>
+```
+
+The `DigestAuthenticator` implementation supports `MD5` as the fallback algorithm and `SHA-256`/`SHA-512-256` per RFC 7616. The nonce itself is hashed with SHA-256 internally.
+
+<Note>
+DIGEST authentication is more secure than BASIC over plain HTTP because passwords are never sent in the clear. However, it is deprecated in HTTP/2 (RFC 7540) and offers weaker protection than FORM over HTTPS with a strong cipher. For new applications prefer FORM over HTTPS.
+</Note>
+
+---
+
+## FORM-Based Authentication
+
+FORM authentication is implemented by `FormAuthenticator`. Instead of the browser's native login dialog it uses a custom HTML login page and error page specified in the `<login-config>`. On successful authentication the user is redirected to the originally requested URL.
+
+**`web.xml` configuration:**
+
+```xml
+<login-config>
+  <auth-method>FORM</auth-method>
+  <realm-name>My Application</realm-name>
+  <form-login-config>
+    <form-login-page>/login.html</form-login-page>
+    <form-error-page>/login-error.html</form-error-page>
+  </form-login-config>
+</login-config>
+```
+
+**Required HTML form structure:**
+
+The form's `action` must be `j_security_check`, and the username and password fields must use the reserved names `j_username` and `j_password`:
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Login</title></head>
+<body>
+  <h2>Application Login</h2>
+  <form method="post" action="j_security_check">
+    <label for="user">Username:</label>
+    <input type="text"     id="user" name="j_username" autocomplete="username" /><br/>
+    <label for="pass">Password:</label>
+    <input type="password" id="pass" name="j_password" autocomplete="current-password" /><br/>
+    <button type="submit">Sign In</button>
+  </form>
+</body>
+</html>
+```
+
+The `FormAuthenticator` creates a temporary session (default timeout: 120 seconds, configurable via `authenticationSessionTimeout`) to hold the saved request while the user completes the login form.
+
+<Note>
+FORM authentication stores the original request in the HTTP session before redirecting to the login page. If the session times out before the user submits the form, the `FormAuthenticator` either redirects to the `landingPage` (if configured) or returns an error response.
+</Note>
+
+---
+
+## SPNEGO / Kerberos Authentication
+
+SPNEGO authentication is implemented by `SpnegoAuthenticator`. It enables transparent single sign-on in Windows Active Directory environments — users already logged in to the domain are authenticated without entering credentials again.
+
+The authenticator sends `WWW-Authenticate: Negotiate` to the browser, receives a Kerberos service ticket (wrapped in a SPNEGO token), and validates it using a JAAS `LoginContext`. The JAAS configuration name defaults to `com.sun.security.jgss.krb5.accept` and is configurable via the `loginConfigName` attribute.
+
+**`web.xml` configuration:**
+
+```xml
+<login-config>
+  <auth-method>SPNEGO</auth-method>
+  <realm-name>Kerberos</realm-name>
+</login-config>
+```
+
+<Steps>
+  <Step title="Create a Kerberos service account">
+    In Active Directory, create a service account (e.g. `HTTP/tomcat.example.com@EXAMPLE.COM`) and export a keytab file.
+  </Step>
+
+  <Step title="Configure krb5.conf">
+    Place a `krb5.conf` (Linux) or `krb5.ini` (Windows) that points to your KDC:
+
+    ```ini
+    [libdefaults]
+        default_realm = EXAMPLE.COM
+        udp_preference_limit = 1
+
+    [realms]
+        EXAMPLE.COM = {
+            kdc = dc.example.com
+            admin_server = dc.example.com
+        }
+
+    [domain_realm]
+        .example.com = EXAMPLE.COM
+        example.com  = EXAMPLE.COM
+    ```
+
+    Point the JVM at it: `-Djava.security.krb5.conf=/etc/krb5.conf`
+  </Step>
+
+  <Step title="Configure the JAAS login module">
+    Create `conf/jaas.config`:
+
+    ```
+    com.sun.security.jgss.krb5.accept {
+        com.sun.security.auth.module.Krb5LoginModule required
+        storeKey="true"
+        useKeyTab="true"
+        keyTab="conf/http-tomcat.keytab"
+        principal="HTTP/tomcat.example.com@EXAMPLE.COM"
+        isInitiator="false"
+        debug="false";
+    };
+    ```
+
+    Add to `CATALINA_OPTS`:
+    ```bash
+    -Djava.security.auth.login.config="${CATALINA_HOME}/conf/jaas.config"
+    ```
+  </Step>
+
+  <Step title="Configure the Realm">
+    Use `JAASRealm` or `SpnegoUserDatabaseRealm` to resolve Kerberos principals to application roles:
+
+    ```xml
+    <Realm className="org.apache.catalina.realm.JAASRealm"
+           appName="com.sun.security.jgss.krb5.accept"
+           userClassNames="com.example.security.KerberosPrincipal"
+           roleClassNames="com.example.security.ApplicationRole" />
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Client Certificate (Mutual TLS) Authentication
+
+CLIENT-CERT authentication is implemented by `SSLAuthenticator`. It validates the client's X.509 certificate against the connector's trust store and then maps the certificate's Subject DN to a Tomcat user principal via the configured Realm.
+
+```xml
+<login-config>
+  <auth-method>CLIENT-CERT</auth-method>
+  <realm-name>Client Certificate Authentication</realm-name>
+</login-config>
+```
+
+This method requires the SSL Connector to have `certificateVerification` set to `required` (or `optional`). See the [SSL/TLS configuration guide](/security/ssl-tls) for full connector setup instructions.
+
+---
+
+## Single Sign-On (SSO) Valve
+
+The `SingleSignOn` valve (`org.apache.catalina.authenticator.SingleSignOn`) propagates an authenticated identity across multiple web applications deployed on the **same** `<Host>`. Once a user authenticates to any application on the host, subsequent requests to other applications on that host automatically receive the cached `Principal` without prompting for credentials again.
+
+As documented in the source Javadoc, requirements for SSO to work are:
+
+- The valve **must** be placed on the `<Host>` element (not `<Engine>` or `<Context>`).
+- The shared `<Realm>` must be configured at the `<Host>` level or higher and **not** overridden per-application.
+- All web applications must use one of the standard Tomcat `Authenticator` implementations.
+
+**Configuration (shown commented out in the default `server.xml`):**
+
+```xml
+<Host name="localhost" appBase="webapps" unpackWARs="true" autoDeploy="true">
+
+  <!-- Enable Single Sign-On across all apps on this host -->
+  <Valve className="org.apache.catalina.authenticator.SingleSignOn" />
+
+  ...
+</Host>
+```
+
+**Optional attributes:**
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `requireReauthentication` | `false` | When `true`, forces each app's authenticator to re-validate credentials (useful when the Realm performs additional setup per-request such as setting EJB security context). |
+| `cookieDomain` | — | Domain to set on the SSO cookie, enabling SSO across subdomains. |
+| `cookieSecure` | — | Set the `Secure` flag on the SSO cookie. Recommended when using HTTPS. |
+| `cookieHttpOnly` | `true` | Set the `HttpOnly` flag on the SSO cookie. |
+
+<Tip>
+SSO only applies to applications on the **same Host** within the same Tomcat instance. Applications deployed on different virtual hosts or different Tomcat instances do not share SSO sessions. For cross-host or cross-instance SSO, consider an external identity provider (SAML, OpenID Connect) in front of Tomcat.
+</Tip>
+
+---
+
+## JASPIC / Jakarta Authentication
+
+Tomcat implements the Jakarta Authentication specification (formerly JASPIC — Java Authentication Service Provider Interface for Containers). This allows third-party `ServerAuthModule` implementations to handle authentication, enabling integration with OAuth 2.0, SAML, JWT, and other modern identity protocols.
+
+**Registering a provider via `conf/jaspic-providers.xml`:**
+
+```xml
+<jaspic-providers>
+  <provider name="myProvider"
+            layer="HttpServlet"
+            appContext="Catalina/localhost /myapp"
+            description="Custom JASPIC provider">
+    <property name="auth.module.class"
+              value="com.example.security.MyServerAuthModule"/>
+    <property name="myapp.secret" value="s3cr3t"/>
+  </provider>
+</jaspic-providers>
+```
+
+**Registering programmatically at application startup** (e.g. in a `ServletContainerInitializer`):
+
+```java
+AuthConfigFactory factory = AuthConfigFactory.getFactory();
+factory.registerConfigProvider(
+    new MyAuthConfigProvider(properties),
+    "HttpServlet",
+    "Catalina/localhost /myapp",
+    "My JASPIC Provider"
+);
+```
+
+<Note>
+When a JASPIC provider is registered for an application context, it takes precedence over the `<login-config>` declaration in `web.xml`. The standard Authenticator valve is bypassed entirely.
+</Note>
+
+---
+
+## Security Constraints Reference
+
+Security constraints are declared entirely in `WEB-INF/web.xml`. A complete example showing all constraint elements:
+
+```xml
+<!-- Protect the /api/* path, require the 'api-user' role, and enforce HTTPS -->
+<security-constraint>
+  <display-name>API Security Constraint</display-name>
+
+  <!-- Define which resources and methods are covered -->
+  <web-resource-collection>
+    <web-resource-name>REST API</web-resource-name>
+    <url-pattern>/api/*</url-pattern>
+    <!-- Omit <http-method> to cover ALL methods -->
+  </web-resource-collection>
+
+  <!-- Restrict access to listed roles -->
+  <auth-constraint>
+    <description>Only API users may access this area</description>
+    <role-name>api-user</role-name>
+  </auth-constraint>
+
+  <!-- Require an encrypted (HTTPS) connection -->
+  <user-data-constraint>
+    <description>Require SSL</description>
+    <transport-guarantee>CONFIDENTIAL</transport-guarantee>
+  </user-data-constraint>
+</security-constraint>
+
+<!-- Allow unauthenticated access to /public/* -->
+<security-constraint>
+  <web-resource-collection>
+    <web-resource-name>Public Area</web-resource-name>
+    <url-pattern>/public/*</url-pattern>
+  </web-resource-collection>
+  <!-- No <auth-constraint> = freely accessible -->
+</security-constraint>
+
+<!-- Role declarations (must list every role referenced above) -->
+<security-role>
+  <role-name>api-user</role-name>
+</security-role>
+```
+
+**`<transport-guarantee>` values:**
+
+| Value | Meaning |
+|-------|---------|
+| `NONE` | No transport requirement (default when element is omitted) |
+| `INTEGRAL` | Data must not be modified in transit (in practice, requires HTTPS) |
+| `CONFIDENTIAL` | Data must be encrypted in transit — Tomcat redirects HTTP to the `redirectPort` |

@@ -1,0 +1,338 @@
+---
+title: "Tomcat Valves and Servlet Filters Reference"
+sidebarTitle: "Valves & Filters"
+description: "Reference for Tomcat's built-in Valves (AccessLog, RemoteIP, RewriteValve, StuckThread, HealthCheck) and Filters (CORS, CSRF, RateLimit, HttpHeaderSecurity) with configuration examples."
+---
+
+Tomcat provides two complementary request-processing extensibility mechanisms: **Valves** and **Servlet Filters**. Valves are Tomcat-native components configured in `server.xml` that operate at the container level (Server, Engine, Host, or Context). Filters are Jakarta EE standard components configured in `web.xml` that operate within a specific web application. Both form ordered processing chains applied to every incoming request.
+
+## Valve Pipeline
+
+Each container (Engine, Host, Context) owns a `Pipeline` consisting of an ordered list of `Valve` instances. A `Valve` receives the `Request` and `Response`, performs its logic, then calls `getNext().invoke()` to pass control down the chain. The last Valve in the chain calls the next container's pipeline.
+
+Configure Valves in `server.xml` inside the container element they should apply to:
+
+```xml server.xml
+<Host name="localhost" appBase="webapps" unpackWARs="true" autoDeploy="true">
+    <!-- Valves at Host level apply to all Contexts on this Host -->
+    <Valve className="org.apache.catalina.valves.AccessLogValve"
+           directory="logs" prefix="localhost_access_log" suffix=".txt"
+           pattern="%h %l %u %t &quot;%r&quot; %s %b" />
+</Host>
+```
+
+## Built-in Valves
+
+### AccessLogValve
+
+`org.apache.catalina.valves.AccessLogValve` — logs every HTTP request to a rotating log file.
+
+```xml
+<Valve className="org.apache.catalina.valves.AccessLogValve"
+       directory="logs"
+       prefix="access_log"
+       suffix=".txt"
+       pattern="combined"
+       rotatable="true"
+       fileDateFormat=".yyyy-MM-dd"
+       buffered="true" />
+```
+
+Key `pattern` tokens:
+
+| Token | Description |
+|-------|-------------|
+| `%h` | Remote host name (or IP if `resolveHosts="false"`) |
+| `%l` | Remote logical username (always `-`) |
+| `%u` | Remote authenticated username |
+| `%t` | Date/time in Common Log Format |
+| `%r` | First line of the request (`GET /path HTTP/1.1`) |
+| `%s` | HTTP status code |
+| `%b` | Response size in bytes (`-` if zero) |
+| `%D` | Response time in milliseconds |
+| `%T` | Response time in seconds |
+| `%I` | Current request thread name |
+| `%{X-Forwarded-For}i` | Arbitrary request header value |
+
+Use `pattern="common"` for Common Log Format or `pattern="combined"` for Combined Log Format.
+
+### JsonAccessLogValve
+
+`org.apache.catalina.valves.JsonAccessLogValve` — emits access logs as JSON Lines, one JSON object per request. Ideal for log aggregation pipelines (ELK, Splunk, Datadog).
+
+```xml
+<Valve className="org.apache.catalina.valves.JsonAccessLogValve"
+       directory="logs"
+       prefix="access_log_json"
+       suffix=".log" />
+```
+
+The output format mirrors `AccessLogValve` patterns but serializes each field as a JSON key-value pair.
+
+### RemoteIpValve
+
+`org.apache.catalina.valves.RemoteIpValve` — corrects the `request.getRemoteAddr()` and `request.isSecure()` values when Tomcat is behind a reverse proxy. Processes `X-Forwarded-For` and `X-Forwarded-Proto` headers.
+
+```xml
+<Valve className="org.apache.catalina.valves.RemoteIpValve"
+       remoteIpHeader="X-Forwarded-For"
+       protocolHeader="X-Forwarded-Proto"
+       internalProxies="10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
+       trustedProxies="" />
+```
+
+<Warning>
+  Always configure `internalProxies` to match only your actual proxy IP ranges. Leaving it too broad allows clients to spoof their IP address via `X-Forwarded-For`.
+</Warning>
+
+### StuckThreadDetectionValve
+
+`org.apache.catalina.valves.StuckThreadDetectionValve` — detects threads that have been processing a request longer than a configured threshold and logs them (or optionally interrupts them).
+
+```xml
+<Valve className="org.apache.catalina.valves.StuckThreadDetectionValve"
+       threshold="60"
+       interruptThreadThreshold="-1" />
+```
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `threshold` | `600` | Seconds before a thread is considered stuck |
+| `interruptThreadThreshold` | `-1` | Seconds before the stuck thread is interrupted; `-1` disables |
+
+### HealthCheckValve
+
+`org.apache.catalina.valves.HealthCheckValve` — returns HTTP 200 (server healthy) or 503 (server pausing/stopping) at a configurable path. Designed for load balancer health probes.
+
+```xml
+<Valve className="org.apache.catalina.valves.HealthCheckValve"
+       path="/health"
+       checkContainersAvailable="true" />
+```
+
+Access at `http://localhost:8080/health`.
+
+### SemaphoreValve
+
+`org.apache.catalina.valves.SemaphoreValve` — limits concurrent request processing using a semaphore. Requests exceeding the concurrency limit block or return an error immediately.
+
+```xml
+<Valve className="org.apache.catalina.valves.SemaphoreValve"
+       concurrency="100"
+       block="true"
+       interruptible="false" />
+```
+
+### RewriteValve
+
+`org.apache.catalina.valves.rewrite.RewriteValve` — mod_rewrite-style URL rewriting. Reads rules from a `rewrite.config` file.
+
+```xml
+<Valve className="org.apache.catalina.valves.rewrite.RewriteValve" />
+```
+
+Place `rewrite.config` in `$CATALINA_BASE/conf/` (Host-level) or `WEB-INF/` (Context-level). Example rules:
+
+```
+RewriteCond %{REQUEST_URI} ^/old-path$
+RewriteRule ^/old-path$ /new-path [L,R=301]
+```
+
+### CrawlerSessionManagerValve
+
+`org.apache.catalina.valves.CrawlerSessionManagerValve` — assigns search engine crawlers a single, shared session to prevent session proliferation.
+
+```xml
+<Valve className="org.apache.catalina.valves.CrawlerSessionManagerValve"
+       crawlerIps=""
+       crawlerUserAgents=".*[Bb]ot.*|.*Yahoo.*|.*[Ss]pider.*" />
+```
+
+### ErrorReportValve / JsonErrorReportValve
+
+`org.apache.catalina.valves.ErrorReportValve` — generates Tomcat's default HTML error pages. Replace with `JsonErrorReportValve` to return JSON error responses (useful for REST APIs).
+
+```xml
+<Valve className="org.apache.catalina.valves.JsonErrorReportValve" />
+```
+
+## Built-in Servlet Filters
+
+Configure Filters in your web application's `web.xml` (or via annotations):
+
+### CorsFilter
+
+`org.apache.catalina.filters.CorsFilter` — implements the W3C CORS specification. Validates `Origin` headers and adds appropriate CORS response headers.
+
+```xml web.xml
+<filter>
+    <filter-name>CorsFilter</filter-name>
+    <filter-class>org.apache.catalina.filters.CorsFilter</filter-class>
+    <init-param>
+        <param-name>cors.allowed.origins</param-name>
+        <param-value>https://app.example.com</param-value>
+    </init-param>
+    <init-param>
+        <param-name>cors.allowed.methods</param-name>
+        <param-value>GET,POST,PUT,DELETE,OPTIONS</param-value>
+    </init-param>
+    <init-param>
+        <param-name>cors.allowed.headers</param-name>
+        <param-value>Content-Type,Authorization</param-value>
+    </init-param>
+    <init-param>
+        <param-name>cors.support.credentials</param-name>
+        <param-value>true</param-value>
+    </init-param>
+</filter>
+<filter-mapping>
+    <filter-name>CorsFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+</filter-mapping>
+```
+
+| Init-param | Default | Description |
+|------------|---------|-------------|
+| `cors.allowed.origins` | `*` | Comma-separated allowed origins (use `*` for all) |
+| `cors.allowed.methods` | `GET,POST,HEAD,OPTIONS` | Allowed HTTP methods |
+| `cors.allowed.headers` | `Origin,Accept,...` | Allowed request headers |
+| `cors.exposed.headers` | *(empty)* | Response headers exposed to the browser |
+| `cors.support.credentials` | `false` | Allow cookies/auth headers in cross-origin requests |
+| `cors.preflight.maxage` | `1800` | Pre-flight cache duration in seconds |
+
+### RateLimitFilter
+
+`org.apache.catalina.filters.RateLimitFilter` — limits requests per IP address within a time window to mitigate DoS and brute-force attacks. Default: 300 requests per 60 seconds.
+
+```xml web.xml
+<filter>
+    <filter-name>RateLimitFilter</filter-name>
+    <filter-class>org.apache.catalina.filters.RateLimitFilter</filter-class>
+    <init-param>
+        <param-name>bucketDuration</param-name>
+        <param-value>60</param-value>
+    </init-param>
+    <init-param>
+        <param-name>bucketRequests</param-name>
+        <param-value>100</param-value>
+    </init-param>
+    <init-param>
+        <param-name>enforce</param-name>
+        <param-value>true</param-value>
+    </init-param>
+</filter>
+```
+
+<Warning>
+  If Tomcat is behind a reverse proxy, ensure `RemoteIpFilter` or `RemoteIpValve` is applied *before* `RateLimitFilter` in the filter chain so the filter sees the real client IP, not the proxy IP.
+</Warning>
+
+### CsrfPreventionFilter
+
+`org.apache.catalina.filters.CsrfPreventionFilter` — implements the synchronizer token pattern to prevent Cross-Site Request Forgery attacks.
+
+```xml web.xml
+<filter>
+    <filter-name>CsrfPreventionFilter</filter-name>
+    <filter-class>org.apache.catalina.filters.CsrfPreventionFilter</filter-class>
+    <init-param>
+        <param-name>entryPoints</param-name>
+        <param-value>/login</param-value>
+    </init-param>
+    <init-param>
+        <param-name>nonceCacheSize</param-name>
+        <param-value>5</param-value>
+    </init-param>
+</filter>
+```
+
+For REST APIs, use `RestCsrfPreventionFilter` instead, which enforces CSRF protection via a custom request header.
+
+### HttpHeaderSecurityFilter
+
+`org.apache.catalina.filters.HttpHeaderSecurityFilter` — adds multiple HTTP security response headers in a single filter.
+
+```xml web.xml
+<filter>
+    <filter-name>HttpHeaderSecurityFilter</filter-name>
+    <filter-class>org.apache.catalina.filters.HttpHeaderSecurityFilter</filter-class>
+    <init-param>
+        <param-name>hstsEnabled</param-name>
+        <param-value>true</param-value>
+    </init-param>
+    <init-param>
+        <param-name>hstsMaxAgeSeconds</param-name>
+        <param-value>31536000</param-value>
+    </init-param>
+    <init-param>
+        <param-name>hstsIncludeSubDomains</param-name>
+        <param-value>true</param-value>
+    </init-param>
+    <init-param>
+        <param-name>antiClickJackingEnabled</param-name>
+        <param-value>true</param-value>
+    </init-param>
+    <init-param>
+        <param-name>antiClickJackingOption</param-name>
+        <param-value>SAMEORIGIN</param-value>
+    </init-param>
+    <init-param>
+        <param-name>blockContentTypeSniffingEnabled</param-name>
+        <param-value>true</param-value>
+    </init-param>
+</filter>
+```
+
+| Header added | Init-param | Default |
+|--------------|------------|---------|
+| `Strict-Transport-Security` | `hstsEnabled` | `true` (only on HTTPS) |
+| `X-Frame-Options` | `antiClickJackingEnabled` | `true` (DENY) |
+| `X-Content-Type-Options: nosniff` | `blockContentTypeSniffingEnabled` | `true` |
+
+## Writing a Custom Valve
+
+Extend `ValveBase` and override `invoke()`:
+
+```java MyLoggingValve.java lines
+import org.apache.catalina.valves.ValveBase;
+import org.apache.catalina.connector.Request;
+import org.apache.catalina.connector.Response;
+
+import jakarta.servlet.ServletException;
+import java.io.IOException;
+
+public class MyLoggingValve extends ValveBase {
+
+    @Override
+    public void invoke(Request request, Response response)
+            throws IOException, ServletException {
+
+        long start = System.currentTimeMillis();
+
+        // Pre-processing: runs before the request reaches the servlet
+        String uri = request.getRequestURI();
+
+        // Pass control to the next Valve in the pipeline
+        getNext().invoke(request, response);
+
+        // Post-processing: runs after the response is generated
+        long duration = System.currentTimeMillis() - start;
+        System.out.printf("%-50s %d ms%n", uri, duration);
+    }
+}
+```
+
+Register in `server.xml`:
+
+```xml
+<Valve className="com.example.MyLoggingValve" />
+```
+
+<CardGroup cols={2}>
+  <Card title="Clustering" icon="network-wired" href="/operations/clustering">
+    Use ClusterValve with SimpleTcpCluster for session replication.
+  </Card>
+  <Card title="Security Realms" icon="shield-halved" href="/security/realms">
+    Configure Realm-based authentication that Valves and Filters can integrate with.
+  </Card>
+</CardGroup>

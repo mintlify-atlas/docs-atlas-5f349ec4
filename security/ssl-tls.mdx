@@ -1,0 +1,259 @@
+---
+title: "Configuring SSL/TLS in Apache Tomcat"
+sidebarTitle: "SSL/TLS"
+description: "Enable HTTPS in Tomcat using JSSE or OpenSSL. Configure SSLHostConfig, certificates, protocols, cipher suites, and client authentication for production deployments."
+---
+
+Tomcat supports SSL/TLS through two implementations: **JSSE** (Java's built-in SSL engine) and **OpenSSL** (via the Tomcat Native/APR library or the Java 22+ Foreign Function & Memory API). Both implementations are configured using the `<SSLHostConfig>` element nested inside an SSL-enabled `<Connector>`, and both support the same XML attribute vocabulary. The choice of implementation affects performance characteristics and certificate management options rather than the configuration structure.
+
+---
+
+## SSL Implementation Options
+
+<CardGroup cols={2}>
+  <Card title="JSSE (Default)" icon="java">
+    Pure-Java TLS implementation bundled with every JDK. No native library required. Works with JKS, PKCS12, and PEM certificate formats. Recommended for most deployments.
+  </Card>
+  <Card title="OpenSSL via APR / Tomcat Native" icon="gear">
+    Uses the Tomcat Native library (compiled against OpenSSL) loaded by `AprLifecycleListener`. Provides superior performance under high connection rates and access to OpenSSL cipher strings.
+  </Card>
+  <Card title="OpenSSL via FFM API (Java 22+)" icon="bolt">
+    Uses OpenSSL through Java 22's Foreign Function & Memory API. Enabled via `OpenSSLLifecycleListener` in `server.xml`. No separate native `.so`/`.dll` required beyond the system OpenSSL library.
+  </Card>
+  <Card title="Choosing an Implementation" icon="check">
+    If you are on Java 22+ and want OpenSSL performance without compiling Tomcat Native, use the FFM listener. Otherwise JSSE is the safest default for portability.
+  </Card>
+</CardGroup>
+
+To activate OpenSSL via Tomcat Native, the `AprLifecycleListener` must be present (it is included by default in `server.xml`):
+
+```xml
+<!-- OpenSSL support using Tomcat Native (APR) -->
+<Listener className="org.apache.catalina.core.AprLifecycleListener" />
+
+<!-- OpenSSL support using FFM API from Java 22 (uncomment to use) -->
+<!-- <Listener className="org.apache.catalina.core.OpenSSLLifecycleListener" /> -->
+```
+
+---
+
+## Enabling HTTPS with JSSE
+
+<Steps>
+  <Step title="Create or obtain a certificate">
+    For development, generate a self-signed certificate with the JDK `keytool` utility:
+
+    ```bash
+    keytool -genkey \
+      -alias tomcat \
+      -keyalg RSA \
+      -keysize 2048 \
+      -validity 365 \
+      -keystore /path/to/keystore.jks \
+      -storepass changeit \
+      -keypass changeit \
+      -dname "CN=localhost, OU=Dev, O=Example, L=City, ST=State, C=US"
+    ```
+
+    For production, use a certificate signed by a trusted CA or obtain a free certificate from Let's Encrypt (see the tip below).
+  </Step>
+
+  <Step title="Place the keystore">
+    Copy the keystore file into `$CATALINA_HOME/conf/` or any accessible path. The default `server.xml` example references `conf/localhost-rsa.jks`.
+  </Step>
+
+  <Step title="Enable the SSL Connector in server.xml">
+    Uncomment (or add) the HTTPS Connector. The example below matches the commented-out connector in the default `server.xml`:
+
+    ```xml
+    <Connector port="8443"
+               protocol="org.apache.coyote.http11.Http11NioProtocol"
+               maxThreads="150"
+               SSLEnabled="true">
+        <SSLHostConfig>
+            <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                         certificateKeystorePassword="changeit"
+                         type="RSA" />
+        </SSLHostConfig>
+    </Connector>
+    ```
+  </Step>
+
+  <Step title="Restart Tomcat">
+    ```bash
+    $CATALINA_HOME/bin/shutdown.sh && $CATALINA_HOME/bin/startup.sh
+    ```
+
+    Verify HTTPS is available at `https://localhost:8443/`.
+  </Step>
+</Steps>
+
+<Warning>
+Disable TLSv1.0 and TLSv1.1 in all production deployments. These protocol versions are deprecated, contain known vulnerabilities, and are rejected by modern browsers. Use the `protocols` attribute on `<SSLHostConfig>` to restrict to `TLSv1.2+TLSv1.3` only.
+</Warning>
+
+---
+
+## SSLHostConfig Attributes
+
+The `<SSLHostConfig>` element controls the TLS handshake parameters that apply to a virtual hostname. When multiple virtual hosts share one connector, each host gets its own `<SSLHostConfig>` identified by the `hostName` attribute (the default is `_default_`).
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `hostName` | `_default_` | Virtual hostname this config applies to. Must match an SNI value. |
+| `sslProtocol` | `TLS` | The overarching protocol family. Normally left as `TLS`. |
+| `protocols` | `all` | Comma/plus-separated list of enabled TLS versions. Example: `TLSv1.2+TLSv1.3` |
+| `ciphers` | JVM default | Cipher suite list in JSSE format (e.g. `TLS_AES_256_GCM_SHA384`) or OpenSSL cipher string. |
+| `honorCipherOrder` | `false` | When `true`, server cipher preference is used instead of client preference. |
+| `certificateVerification` | `none` | Client certificate verification: `none`, `optional`, `optionalNoCA`, or `required`. |
+| `truststoreFile` | — | Path to the trust store used for client certificate verification. |
+| `truststorePassword` | — | Password for `truststoreFile`. |
+| `truststoreType` | `JKS` | Type of the trust store: `JKS`, `PKCS12`, etc. |
+| `disableSessionTickets` | `false` | Set `true` to disable TLS session tickets (improves forward secrecy). |
+| `sessionCacheSize` | `0` (unlimited) | Maximum number of SSL sessions in the cache. |
+| `sessionTimeout` | `86400` | SSL session timeout in seconds (default 24 hours). |
+
+**Recommended production configuration:**
+
+```xml
+<SSLHostConfig protocols="TLSv1.2+TLSv1.3"
+               ciphers="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384"
+               honorCipherOrder="true"
+               disableSessionTickets="false">
+    <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                 certificateKeystorePassword="changeit"
+                 type="RSA" />
+</SSLHostConfig>
+```
+
+---
+
+## `<Certificate>` Element Attributes
+
+Each `<SSLHostConfig>` element must contain at least one `<Certificate>` child that identifies the server's TLS certificate and key material. Multiple `<Certificate>` elements with different `type` values (e.g. one RSA and one EC) enable dual-certificate configurations where the server picks the best certificate for each client.
+
+| Attribute | Description |
+|-----------|-------------|
+| `type` | Certificate algorithm: `RSA`, `EC`, or `DSA`. Must match the key type. |
+| `certificateKeystoreFile` | Path to a JKS or PKCS12 keystore containing the certificate and private key. |
+| `certificateKeystorePassword` | Password to unlock the keystore. |
+| `certificateKeystoreType` | Keystore format: `JKS` (default) or `PKCS12`. |
+| `certificateKeyAlias` | Alias of the entry to use within the keystore when it contains multiple entries. |
+| `certificateFile` | Path to a PEM-encoded certificate file (alternative to keystore). |
+| `certificateKeyFile` | Path to a PEM-encoded private key file (used together with `certificateFile`). |
+| `certificateChainFile` | Path to a PEM file containing intermediate CA certificates. |
+
+**PEM certificate example (no keystore):**
+
+```xml
+<Certificate type="RSA"
+             certificateFile="conf/server.crt"
+             certificateKeyFile="conf/server.key"
+             certificateChainFile="conf/chain.pem" />
+```
+
+<Tip>
+Certificates from Let's Encrypt are issued in PEM format (`.crt` / `.key` files). Use the `certificateFile` and `certificateKeyFile` attributes directly — no conversion to JKS is needed. Renew the certificate with Certbot and restart Tomcat (or use the Manager application) to reload.
+</Tip>
+
+---
+
+## HTTP/2 with SSL
+
+HTTP/2 requires HTTPS and is enabled by nesting an `<UpgradeProtocol>` element inside the SSL `<Connector>`. The default `server.xml` includes this in the commented-out HTTPS connector example:
+
+```xml
+<Connector port="8443"
+           protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="150"
+           SSLEnabled="true">
+    <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+    <SSLHostConfig protocols="TLSv1.2+TLSv1.3">
+        <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                     certificateKeystorePassword="changeit"
+                     type="RSA" />
+    </SSLHostConfig>
+</Connector>
+```
+
+HTTP/2 uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to negotiate the protocol. ALPN requires Java 8u251+ or the Tomcat Native library on older JDKs.
+
+<Note>
+HTTP/2 mandates TLSv1.2 or higher and prohibits many older cipher suites defined in the HTTP/2 cipher blacklist (RFC 7540, Appendix A). If you restrict ciphers manually, ensure at least one non-blacklisted cipher is enabled.
+</Note>
+
+---
+
+## Client Certificate Authentication
+
+Mutual TLS (mTLS) requires each connecting client to present a certificate signed by a CA that Tomcat trusts. To enable it:
+
+<Steps>
+  <Step title="Set certificateVerification on SSLHostConfig">
+    Use `required` to mandate client certificates or `optional` to accept them when present:
+
+    ```xml
+    <SSLHostConfig protocols="TLSv1.2+TLSv1.3"
+                   certificateVerification="required"
+                   truststoreFile="conf/client-ca-truststore.jks"
+                   truststorePassword="changeit"
+                   truststoreType="JKS">
+        <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                     certificateKeystorePassword="changeit"
+                     type="RSA" />
+    </SSLHostConfig>
+    ```
+  </Step>
+
+  <Step title="Declare CLIENT-CERT auth in web.xml">
+    ```xml
+    <login-config>
+      <auth-method>CLIENT-CERT</auth-method>
+      <realm-name>Client Certificate Authentication</realm-name>
+    </login-config>
+    ```
+  </Step>
+
+  <Step title="Populate the TrustStore">
+    Import the client CA certificate into the truststore:
+
+    ```bash
+    keytool -import \
+      -alias client-ca \
+      -file client-ca.crt \
+      -keystore conf/client-ca-truststore.jks \
+      -storepass changeit
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Redirecting HTTP to HTTPS
+
+Use a two-step approach: mark the HTTP Connector with a `redirectPort`, then declare a `CONFIDENTIAL` transport guarantee in the web application's `web.xml`.
+
+**Step 1 — HTTP Connector (already the default):**
+
+```xml
+<Connector port="8080"
+           protocol="HTTP/1.1"
+           connectionTimeout="20000"
+           redirectPort="8443" />
+```
+
+**Step 2 — `web.xml` security constraint:**
+
+```xml
+<security-constraint>
+  <web-resource-collection>
+    <web-resource-name>Secure Everything</web-resource-name>
+    <url-pattern>/*</url-pattern>
+  </web-resource-collection>
+  <user-data-constraint>
+    <transport-guarantee>CONFIDENTIAL</transport-guarantee>
+  </user-data-constraint>
+</security-constraint>
+```
+
+When Tomcat processes a request matching the URL pattern over HTTP, it automatically issues a `302` redirect to the same URL on the `redirectPort`. No external load-balancer or reverse-proxy configuration is required.

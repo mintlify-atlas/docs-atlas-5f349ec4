@@ -1,0 +1,267 @@
+---
+title: "Configuring Apache Tomcat with server.xml"
+sidebarTitle: "server.xml"
+description: "Reference guide for server.xml — Tomcat's primary configuration file covering Server, Service, Connector, Engine, Host, Context, Realm, and Valve elements."
+---
+
+`server.xml` is loaded at startup by Catalina, Tomcat's servlet container. It defines the entire container hierarchy — from the top-level `<Server>` element down through `<Service>`, `<Connector>`, `<Engine>`, `<Host>`, and `<Context>` components. Every component you want Tomcat to manage at the process level must be declared here. Changes to `server.xml` take effect only after a full restart of the Tomcat process.
+
+## File Location
+
+Tomcat resolves `server.xml` from the active configuration directory:
+
+| Variable | Path |
+|---|---|
+| Single instance | `$CATALINA_HOME/conf/server.xml` |
+| Multiple instances | `$CATALINA_BASE/conf/server.xml` |
+
+When `CATALINA_BASE` is set to a directory separate from `CATALINA_HOME`, the server reads configuration from `CATALINA_BASE`. This is the recommended layout for running multiple Tomcat instances from a single binary distribution. The values of `CATALINA_HOME` and `CATALINA_BASE` are also available as `${catalina.home}` and `${catalina.base}` inside all XML configuration files.
+
+## Top-Level Structure
+
+The following listing is the complete default `server.xml` shipped with Tomcat. All optional and commented-out elements are preserved so you can see the full set of possibilities:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Server port="8005" shutdown="SHUTDOWN">
+  <Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+  <!-- OpenSSL support using Tomcat Native -->
+  <Listener className="org.apache.catalina.core.AprLifecycleListener" />
+  <!-- Prevent memory leaks due to use of particular java/javax APIs -->
+  <Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+  <Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />
+  <Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+
+  <GlobalNamingResources>
+    <Resource name="UserDatabase" auth="Container"
+              type="org.apache.catalina.UserDatabase"
+              description="User database that can be updated and saved"
+              factory="org.apache.catalina.users.MemoryUserDatabaseFactory"
+              pathname="conf/tomcat-users.xml" />
+  </GlobalNamingResources>
+
+  <Service name="Catalina">
+
+    <!--
+    <Executor name="tomcatThreadPool" namePrefix="catalina-exec-"
+        maxThreads="150" minSpareThreads="4"/>
+    -->
+
+    <Connector port="8080" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="8443" />
+
+    <!--
+    <Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+               maxThreads="150" SSLEnabled="true">
+        <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+        <SSLHostConfig>
+            <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                         certificateKeystorePassword="changeit" type="RSA" />
+        </SSLHostConfig>
+    </Connector>
+    -->
+
+    <!--
+    <Connector protocol="AJP/1.3"
+               address="::1"
+               port="8009"
+               redirectPort="8443" />
+    -->
+
+    <Engine name="Catalina" defaultHost="localhost">
+
+      <Realm className="org.apache.catalina.realm.LockOutRealm">
+        <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+               resourceName="UserDatabase"/>
+      </Realm>
+
+      <Host name="localhost" appBase="webapps"
+            unpackWARs="true" autoDeploy="true">
+
+        <Valve className="org.apache.catalina.valves.AccessLogValve"
+               directory="logs"
+               prefix="localhost_access_log" suffix=".txt"
+               pattern="%h %l %u %t &quot;%r&quot; %s %b" />
+      </Host>
+    </Engine>
+  </Service>
+</Server>
+```
+
+## `<Server>` Element
+
+The `<Server>` element is the root element of `server.xml`. It represents the entire Tomcat process and can contain one or more `<Service>` children.
+
+```xml
+<Server port="8005" shutdown="SHUTDOWN">
+  ...
+</Server>
+```
+
+| Attribute | Default | Description |
+|---|---|---|
+| `port` | `8005` | TCP port on which Tomcat listens for a shutdown command. Set to `-1` to disable the shutdown port entirely. |
+| `shutdown` | `SHUTDOWN` | The exact string that must be sent to the shutdown port to trigger a graceful shutdown. |
+| `address` | `localhost` | The address on which the shutdown socket listens. Defaults to `localhost` to prevent remote shutdown. |
+
+<Note>
+  Setting `port="-1"` disables the shutdown port. This is recommended in containerised or orchestrated environments where process lifecycle is managed externally (e.g., by Kubernetes).
+</Note>
+
+## `<Service>` Element
+
+A `<Service>` groups one or more `<Connector>` elements with a single `<Engine>`. The Connectors each accept requests on different ports or protocols and hand them off to the shared Engine for processing.
+
+```xml
+<Service name="Catalina">
+  <Connector port="8080" protocol="HTTP/1.1" ... />
+  <Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol" SSLEnabled="true" ... />
+  <Engine name="Catalina" defaultHost="localhost">
+    ...
+  </Engine>
+</Service>
+```
+
+| Attribute | Default | Description |
+|---|---|---|
+| `name` | — | Human-readable name for this service, used in log messages and JMX. The default is `Catalina`. |
+
+Most deployments run a single `<Service>` named `Catalina`. You can define multiple services if you need completely separate Connector/Engine groupings within one JVM process.
+
+## `<Connector>` Element
+
+A `<Connector>` represents an endpoint that receives client requests. Tomcat ships with three built-in protocol implementations:
+
+| `protocol` value | Implementation class | Use case |
+|---|---|---|
+| `HTTP/1.1` | `Http11NioProtocol` (resolved automatically) | Standard HTTP traffic |
+| `org.apache.coyote.http11.Http11NioProtocol` | Same as above, explicit | Standard HTTP traffic |
+| `AJP/1.3` | `AjpNioProtocol` | Reverse proxy via Apache httpd mod_jk/mod_proxy_ajp |
+
+```xml
+<!-- Minimal HTTP/1.1 connector -->
+<Connector port="8080" protocol="HTTP/1.1"
+           connectionTimeout="20000"
+           redirectPort="8443" />
+```
+
+Key attributes for HTTP connectors:
+
+| Attribute | Default | Description |
+|---|---|---|
+| `port` | — | TCP port number. Required. Use `8080` for HTTP, `8443` for HTTPS. |
+| `protocol` | `HTTP/1.1` | Protocol handler class name or shorthand alias. |
+| `connectionTimeout` | `20000` | Milliseconds to wait for the request URI line after accepting the connection. |
+| `redirectPort` | `443` | Port used for `<security-constraint>` redirects from HTTP to HTTPS. |
+| `maxThreads` | `200` | Maximum number of simultaneous request-processing threads. |
+| `executor` | — | Name of a shared `<Executor>`. If set, `maxThreads` on the Connector is ignored. |
+
+**HTTP/2 UpgradeProtocol** — HTTP/2 is enabled by nesting an `<UpgradeProtocol>` inside a TLS-enabled Connector:
+
+```xml
+<Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="150" SSLEnabled="true">
+    <UpgradeProtocol className="org.apache.coyote.http2.Http2Protocol" />
+    <SSLHostConfig>
+        <Certificate certificateKeystoreFile="conf/localhost-rsa.jks"
+                     certificateKeystorePassword="changeit" type="RSA" />
+    </SSLHostConfig>
+</Connector>
+```
+
+See the [Connectors](/configuration/connectors) page for the full attribute reference, AJP configuration, shared Executor setup, and SSL/TLS details.
+
+## `<Engine>` Element
+
+The `<Engine>` is the top-level container inside a `<Service>`. It receives all requests forwarded by the Connectors and routes them to the appropriate `<Host>` based on the `Host` header.
+
+```xml
+<Engine name="Catalina" defaultHost="localhost">
+  ...
+</Engine>
+```
+
+| Attribute | Default | Description |
+|---|---|---|
+| `name` | — | Logical name. Used in log messages. Typically `Catalina`. |
+| `defaultHost` | — | Name of the `<Host>` that handles requests for unrecognised `Host` headers. Required. |
+| `jvmRoute` | — | Unique identifier appended to session IDs for sticky-session load balancing over AJP. Example: `jvm1`. |
+
+To enable AJP-based load balancing, set `jvmRoute`:
+
+```xml
+<Engine name="Catalina" defaultHost="localhost" jvmRoute="jvm1">
+```
+
+## `<Host>` Element
+
+A `<Host>` element represents a virtual host. You can define multiple `<Host>` children inside one `<Engine>` to serve different domain names from the same Tomcat instance.
+
+```xml
+<Host name="localhost" appBase="webapps"
+      unpackWARs="true" autoDeploy="true">
+
+  <Valve className="org.apache.catalina.valves.AccessLogValve"
+         directory="logs"
+         prefix="localhost_access_log" suffix=".txt"
+         pattern="%h %l %u %t &quot;%r&quot; %s %b" />
+</Host>
+```
+
+| Attribute | Default | Description |
+|---|---|---|
+| `name` | — | DNS name of this virtual host. Must match the `defaultHost` of the parent `<Engine>` for at least one `<Host>`. |
+| `appBase` | `webapps` | Directory (relative to `CATALINA_HOME`) where web applications are deployed. |
+| `unpackWARs` | `true` | Automatically unpack `.war` files to a subdirectory before deployment. |
+| `autoDeploy` | `true` | Periodically check `appBase` for new or updated applications and deploy them without restart. |
+| `deployOnStartup` | `true` | Deploy applications found in `appBase` when Tomcat starts. |
+| `workDir` | — | Override for the working directory used to store JSP-compiled classes. Defaults to `$CATALINA_HOME/work`. |
+
+## `<Context>` Element
+
+A `<Context>` element represents a single web application. Contexts can be declared in three places (described in detail on the [Context](/configuration/context) page), including inline inside a `<Host>`:
+
+```xml
+<Host name="localhost" appBase="webapps" unpackWARs="true" autoDeploy="true">
+  <Context path="/myapp" docBase="/opt/apps/myapp" reloadable="true" />
+</Host>
+```
+
+| Attribute | Default | Description |
+|---|---|---|
+| `path` | — | URL context path. Use `""` (empty string) for the ROOT application. |
+| `docBase` | — | Absolute path or path relative to `appBase` pointing to a WAR file or exploded directory. |
+| `reloadable` | `false` | When `true`, Tomcat watches `WEB-INF/classes` and `WEB-INF/lib` and reloads the application when changes are detected. Not recommended for production. |
+
+## Lifecycle Listeners
+
+Lifecycle Listeners hook into the Tomcat startup and shutdown sequence. The default `server.xml` registers the following listeners at the `<Server>` level:
+
+| Listener class | Purpose |
+|---|---|
+| `org.apache.catalina.startup.VersionLoggerListener` | Logs Tomcat version, OS, and JVM information at startup. Useful for diagnosing environment issues. |
+| `org.apache.catalina.core.AprLifecycleListener` | Initialises the Tomcat Native (APR/OpenSSL) library if present, enabling native SSL and OS-level socket optimisations. |
+| `org.apache.catalina.core.JreMemoryLeakPreventionListener` | Works around known JRE memory leak patterns triggered by certain `java.*` and `javax.*` APIs during class loading. |
+| `org.apache.catalina.mbeans.GlobalResourcesLifecycleListener` | Creates MBeans for the resources declared in `<GlobalNamingResources>` so they appear in JMX consoles. |
+| `org.apache.catalina.core.ThreadLocalLeakPreventionListener` | Triggers renewal of threads in the thread pool when a web application is stopped, preventing `ThreadLocal` leaks. |
+
+An optional `SecurityListener` is also available but commented out by default:
+
+```xml
+<!-- Enable to apply OS-level security checks at startup -->
+<Listener className="org.apache.catalina.security.SecurityListener" />
+```
+
+Full registration in context:
+
+```xml
+<Server port="8005" shutdown="SHUTDOWN">
+  <Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+  <Listener className="org.apache.catalina.core.AprLifecycleListener" />
+  <Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+  <Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />
+  <Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+  ...
+</Server>
+```

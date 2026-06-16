@@ -1,0 +1,346 @@
+---
+title: "Installing Apache Tomcat on Linux, macOS, and Windows"
+sidebarTitle: "Installation"
+description: "Complete installation guide for Apache Tomcat including JDK requirements, environment variable setup, directory layout, and running as a system service."
+---
+
+This page covers a complete, production-ready Apache Tomcat installation across Linux, macOS, and Windows. Beyond the basics of downloading and starting Tomcat, you will learn how to run Tomcat as a system service (systemd on Linux, Windows Service on Windows), validate your configuration with the built-in `configtest` command, and use the `CATALINA_BASE` pattern to run multiple independent Tomcat instances from a single shared binary installation.
+
+## System Requirements
+
+Apache Tomcat is a Java application and requires a compatible Java runtime. The minimum Java version and specification targets vary by Tomcat major release:
+
+| Tomcat Version | Jakarta Servlet | Jakarta Pages | Minimum Java Version |
+|---------------|-----------------|---------------|----------------------|
+| 11.0.x | 6.0 | 4.0 | 17 |
+| 10.1.x | 6.0 | 3.1 | 11 |
+| 9.0.x | 4.0 | 2.3 | 8 |
+
+<Note>
+  Tomcat 10.x and 11.x use the `jakarta.*` package namespace (Jakarta EE 9+). Applications written against the `javax.*` namespace (Java EE 8 and earlier) must target Tomcat 9.x or be migrated using the [Tomcat Migration Tool for Jakarta EE](https://github.com/apache/tomcat-jakartaee-migration). The `JRE_HOME` variable may be used instead of `JAVA_HOME`, but `JAVA_HOME` is recommended as it unlocks additional startup options.
+</Note>
+
+A full Java Development Kit (JDK) is preferred over a bare JRE. Download a current LTS release from:
+- [Eclipse Temurin (Adoptium)](https://adoptium.net)
+- [Oracle JDK](https://www.oracle.com/java/technologies/downloads/)
+- [OpenJDK](https://openjdk.org/install/)
+
+## Directory Layout
+
+When you extract a Tomcat binary distribution, `CATALINA_HOME` is the root of that directory. The standard layout is:
+
+| Directory | Purpose |
+|-----------|---------|
+| `bin/` | Startup and shutdown scripts (`startup.sh`, `shutdown.sh`, `catalina.sh` on Unix; `.bat` equivalents on Windows). Also contains `bootstrap.jar` and `tomcat-juli.jar`. |
+| `conf/` | Server configuration files. The primary file is `server.xml`. Also contains `web.xml` (global servlet defaults), `context.xml` (global context defaults), `tomcat-users.xml`, and `logging.properties`. |
+| `lib/` | JAR libraries shared across all web applications — `catalina.jar`, `servlet-api.jar`, `jsp-api.jar`, and others. |
+| `logs/` | Runtime log files. `catalina.out` captures stdout/stderr from the JVM. Access logs (e.g., `localhost_access_log.YYYY-MM-DD.txt`) are written here by the `AccessLogValve`. |
+| `webapps/` | The default application base directory. Any WAR file or expanded directory placed here is automatically deployed when `autoDeploy="true"` on the `<Host>`. Ships with `ROOT`, `docs`, `examples`, `host-manager`, and `manager`. |
+| `work/` | Jasper's working directory for compiled JSP classes. Each context gets its own subdirectory under `work/Catalina/<hostname>/<context-path>/`. |
+| `temp/` | Directory passed to the JVM as `java.io.tmpdir`. Used for temporary files by Tomcat and running web applications. |
+
+## CATALINA_HOME vs CATALINA_BASE
+
+Tomcat distinguishes between two root directories to support running multiple server instances from a single binary installation:
+
+**`CATALINA_HOME`** is the location of the Tomcat binary distribution — startup scripts, shared libraries, and the base set of files that never change between instances. You download and extract this once.
+
+**`CATALINA_BASE`** is the location of the active configuration and runtime state for a specific Tomcat instance — `conf/`, `logs/`, `webapps/`, `work/`, and `temp/`. It defaults to the same value as `CATALINA_HOME` when running a single instance.
+
+When `CATALINA_BASE` and `CATALINA_HOME` are set to different directories, the split is as follows:
+
+**Directories read from `CATALINA_BASE`:**
+
+| Path | Content |
+|------|---------|
+| `bin/setenv.sh` (or `.bat`) | Instance-specific environment variable overrides |
+| `bin/tomcat-juli.jar` | Instance-specific logging implementation (optional override) |
+| `conf/` | All server configuration files, including `server.xml` |
+| `lib/` | Instance-specific JAR libraries (e.g., JDBC drivers) |
+| `logs/` | Log and output files for this instance |
+| `webapps/` | Deployed web applications for this instance |
+| `work/` | JSP compilation working directories |
+| `temp/` | JVM temporary files for this instance |
+
+**Directories read from `CATALINA_HOME`:**
+
+| Path | Content |
+|------|---------|
+| `bin/` | All startup/shutdown scripts (unless overridden in `CATALINA_BASE/bin/`) |
+| `lib/` | Shared Tomcat libraries (merged with `CATALINA_BASE/lib/` at startup; `CATALINA_BASE` entries take precedence) |
+
+The values of `CATALINA_HOME` and `CATALINA_BASE` are available as `${catalina.home}` and `${catalina.base}` within XML configuration files, making it straightforward to reference shared resources.
+
+## Linux / macOS Installation
+
+<Steps>
+  <Step title="Download and Extract">
+    Download the latest `.tar.gz` binary distribution from [tomcat.apache.org](https://tomcat.apache.org) and extract it to a permanent location:
+
+    ```bash
+    # Download (replace version number as needed)
+    curl -O https://downloads.apache.org/tomcat/tomcat-11/v11.0.x/bin/apache-tomcat-11.0.x.tar.gz
+
+    # Verify the checksum (SHA-512 file is provided alongside the download)
+    sha512sum -c apache-tomcat-11.0.x.tar.gz.sha512
+
+    # Extract to /opt
+    sudo tar -xzf apache-tomcat-11.0.x.tar.gz -C /opt
+    sudo ln -s /opt/apache-tomcat-11.0.x /opt/tomcat
+    ```
+  </Step>
+
+  <Step title="Set JAVA_HOME and CATALINA_HOME">
+    Add the environment variables to your shell profile. For system-wide availability, add them to `/etc/environment` or `/etc/profile.d/tomcat.sh`. For a single user, use `~/.bash_profile` or `~/.zshrc`:
+
+    ```bash
+    # ~/.bash_profile or ~/.zshrc
+    export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+    export CATALINA_HOME=/opt/tomcat
+
+    # Apply to the current session
+    source ~/.bash_profile
+    ```
+
+    You can also create a `setenv.sh` file inside `$CATALINA_HOME/bin/` to configure Tomcat-specific options without polluting your global shell environment:
+
+    ```bash
+    # $CATALINA_HOME/bin/setenv.sh
+    export CATALINA_PID="$CATALINA_BASE/temp/tomcat.pid"
+    export CATALINA_OPTS="-Xms512m -Xmx1024m -server -XX:+UseG1GC"
+    ```
+
+    <Note>
+      Use `CATALINA_OPTS` for JVM flags that affect only the Tomcat server process (e.g., heap settings). Use `JAVA_OPTS` only for options that must apply to both the start and stop commands. Never set memory limits in `JAVA_OPTS`.
+    </Note>
+  </Step>
+
+  <Step title="Make Scripts Executable">
+    Binary distributions downloaded on Linux or macOS may not have the execute bit set on the shell scripts:
+
+    ```bash
+    chmod +x $CATALINA_HOME/bin/*.sh
+    ```
+  </Step>
+
+  <Step title="Start Tomcat">
+    ```bash
+    # Start Tomcat in the background (output goes to logs/catalina.out)
+    $CATALINA_HOME/bin/startup.sh
+
+    # Verify it started
+    tail -f $CATALINA_HOME/logs/catalina.out
+
+    # Stop Tomcat
+    $CATALINA_HOME/bin/shutdown.sh
+    ```
+
+    Confirm the server is listening:
+
+    ```bash
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/
+    # 200
+    ```
+  </Step>
+
+  <Step title="Optional: Run as a systemd Service">
+    For production Linux deployments, manage Tomcat through systemd so that it starts automatically on boot and restarts on failure. First, create a dedicated system user:
+
+    ```bash
+    sudo useradd -r -m -U -d /opt/tomcat -s /bin/false tomcat
+    sudo chown -R tomcat:tomcat /opt/tomcat
+    ```
+
+    Create the systemd unit file at `/etc/systemd/system/tomcat.service`:
+
+    ```ini
+    [Unit]
+    Description=Apache Tomcat Web Application Server
+    After=network.target
+
+    [Service]
+    Type=forking
+
+    User=tomcat
+    Group=tomcat
+
+    Environment="JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64"
+    Environment="CATALINA_HOME=/opt/tomcat"
+    Environment="CATALINA_BASE=/opt/tomcat"
+    Environment="CATALINA_PID=/opt/tomcat/temp/tomcat.pid"
+    Environment="CATALINA_OPTS=-Xms512m -Xmx1024m -server -XX:+UseG1GC"
+
+    ExecStart=/opt/tomcat/bin/startup.sh
+    ExecStop=/opt/tomcat/bin/shutdown.sh
+
+    Restart=on-failure
+    RestartSec=10
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+
+    Enable and start the service:
+
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable tomcat
+    sudo systemctl start tomcat
+    sudo systemctl status tomcat
+    ```
+  </Step>
+</Steps>
+
+## Windows Installation
+
+<Steps>
+  <Step title="Download">
+    From [tomcat.apache.org](https://tomcat.apache.org), choose either:
+    - **32-bit/64-bit Windows zip** — a portable, no-installer distribution equivalent to the `.tar.gz` on Unix.
+    - **32-bit/64-bit Windows Service Installer** (`.exe`) — installs Tomcat as a Windows Service automatically using Apache Commons Procrun (`tomcat11.exe` / `tomcat11w.exe`).
+
+    For the ZIP distribution, extract it to a fixed path such as `C:\apache-tomcat-11.0.x`.
+  </Step>
+
+  <Step title="Set Environment Variables">
+    Open **System Properties → Advanced → Environment Variables** and add:
+
+    ```
+    Variable:  JAVA_HOME
+    Value:     C:\Program Files\Eclipse Adoptium\jdk-21.0.x-hotspot
+
+    Variable:  CATALINA_HOME
+    Value:     C:\apache-tomcat-11.0.x
+    ```
+
+    Or set them persistently from an elevated Command Prompt:
+
+    ```batch
+    setx /M JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-21.0.x-hotspot"
+    setx /M CATALINA_HOME "C:\apache-tomcat-11.0.x"
+    ```
+
+    Optionally create `%CATALINA_HOME%\bin\setenv.bat` for Tomcat-specific options:
+
+    ```batch
+    set "CATALINA_OPTS=-Xms512m -Xmx1024m -server"
+    exit /b 0
+    ```
+  </Step>
+
+  <Step title="Start Tomcat">
+    Open a Command Prompt and run:
+
+    ```batch
+    %CATALINA_HOME%\bin\startup.bat
+    ```
+
+    A new console window opens showing Tomcat's log output. To stop the server:
+
+    ```batch
+    %CATALINA_HOME%\bin\shutdown.bat
+    ```
+  </Step>
+
+  <Step title="Optional: Install as a Windows Service">
+    The Windows ZIP distribution ships with `service.bat`, which wraps Tomcat using Apache Commons Daemon Procrun. From an **elevated** (Administrator) Command Prompt:
+
+    ```batch
+    cd %CATALINA_HOME%\bin
+
+    :: Install the service (default service name: Tomcat11)
+    service.bat install
+
+    :: Start the service
+    net start Tomcat11
+
+    :: Stop the service
+    net stop Tomcat11
+
+    :: Remove the service
+    service.bat remove
+    ```
+
+    After installation, the service appears in **Services** (`services.msc`) and can be configured to start automatically. The graphical monitor application (`tomcat11w.exe`) lets you adjust JVM options, logging, and startup mode through a GUI.
+
+    <Warning>
+      The Windows Service Installer (`.exe`) already handles service registration automatically. Use `service.bat` only when installing from the ZIP distribution manually.
+    </Warning>
+  </Step>
+</Steps>
+
+## Running Multiple Instances
+
+The `CATALINA_BASE` pattern lets you run several isolated Tomcat instances — each with its own configuration, web applications, and log files — from a single shared binary installation. This is ideal for hosting multiple environments (dev/staging/prod) or multiple tenants on the same host.
+
+Create a separate `CATALINA_BASE` directory for each instance with only the directories that vary per instance:
+
+```bash
+# Create the instance directory structure
+INSTANCE=/opt/tomcat-instances/instance1
+mkdir -p $INSTANCE/{conf,logs,webapps,work,temp,bin}
+
+# Copy the default configuration files as a starting point
+cp $CATALINA_HOME/conf/server.xml    $INSTANCE/conf/
+cp $CATALINA_HOME/conf/web.xml       $INSTANCE/conf/
+cp $CATALINA_HOME/conf/context.xml   $INSTANCE/conf/
+cp $CATALINA_HOME/conf/logging.properties $INSTANCE/conf/
+```
+
+Edit `$INSTANCE/conf/server.xml` to use a unique port set (the default `8005`, `8080`, and `8443` must not conflict between instances):
+
+```xml
+<!-- instance1/conf/server.xml — change all three ports -->
+<Server port="8105" shutdown="SHUTDOWN">
+  <Service name="Catalina">
+    <Connector port="8180" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="8543" />
+    <Engine name="Catalina" defaultHost="localhost">
+      <Host name="localhost" appBase="webapps"
+            unpackWARs="true" autoDeploy="true" />
+    </Engine>
+  </Service>
+</Server>
+```
+
+Start the instance by setting `CATALINA_BASE` before calling the shared startup script:
+
+```bash
+export CATALINA_HOME=/opt/tomcat
+export CATALINA_BASE=/opt/tomcat-instances/instance1
+$CATALINA_HOME/bin/startup.sh
+```
+
+Or create a per-instance `setenv.sh` to make this self-contained:
+
+```bash
+# /opt/tomcat-instances/instance1/bin/setenv.sh
+export CATALINA_BASE=/opt/tomcat-instances/instance1
+export CATALINA_PID="$CATALINA_BASE/temp/tomcat.pid"
+```
+
+## Validating Configuration
+
+<Tip>
+  Before starting Tomcat after any configuration change, use the `configtest` command to validate `server.xml` and all other configuration files without actually starting the server. This catches XML syntax errors, missing files, and port conflicts before they cause a failed startup.
+
+  ```bash
+  # Linux / macOS
+  $CATALINA_HOME/bin/configtest.sh
+
+  # Windows
+  %CATALINA_HOME%\bin\configtest.bat
+  ```
+
+  A successful test exits with code `0` and prints `Command line argument: configtest` followed by any warnings. A failed test prints the first error encountered and exits with a non-zero code.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    A concise five-step guide to download, configure, start Tomcat, and deploy your first web application.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/configuration/server-xml">
+    Full reference documentation for every element in `conf/server.xml`, including Connectors, Valves, Realms, and Executors.
+  </Card>
+</CardGroup>

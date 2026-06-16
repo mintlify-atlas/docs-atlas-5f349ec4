@@ -1,0 +1,280 @@
+---
+title: "Logging Configuration in Apache Tomcat"
+sidebarTitle: "Logging"
+description: "Configure Tomcat logging with JULI, access logs via AccessLogValve, JSON access logs, extended access logs, and log rotation. Covers per-application and system-level logging."
+---
+
+Tomcat uses JULI (Java Util Logging Infrastructure), an enhanced implementation of `java.util.logging`, for system and container logs. JULI adds class-loader awareness so that each web application can maintain isolated logging configuration, a critical feature in multi-tenant deployments. Access logging — recording every HTTP request — is handled separately by the `AccessLogValve` family of valves, which write structured log files independently of the JULI system.
+
+## JULI and logging.properties
+
+Tomcat's JULI layer extends `java.util.logging` with asynchronous file handlers, per-webapp logger isolation, and class-loader-scoped configuration. The system-level logging configuration lives in `conf/logging.properties`.
+
+The default `conf/logging.properties` shipped with Tomcat configures four `AsyncFileHandler` instances (one per internal component) plus a `ConsoleHandler`:
+
+```properties
+# conf/logging.properties
+
+handlers = 1catalina.org.apache.juli.AsyncFileHandler, \
+           2localhost.org.apache.juli.AsyncFileHandler, \
+           3manager.org.apache.juli.AsyncFileHandler, \
+           4host-manager.org.apache.juli.AsyncFileHandler, \
+           java.util.logging.ConsoleHandler
+
+.handlers = 1catalina.org.apache.juli.AsyncFileHandler, \
+            java.util.logging.ConsoleHandler
+
+############################################################
+# Handler specific properties.
+############################################################
+
+1catalina.org.apache.juli.AsyncFileHandler.level     = ALL
+1catalina.org.apache.juli.AsyncFileHandler.directory = ${catalina.base}/logs
+1catalina.org.apache.juli.AsyncFileHandler.prefix    = catalina.
+1catalina.org.apache.juli.AsyncFileHandler.maxDays   = 90
+1catalina.org.apache.juli.AsyncFileHandler.encoding  = UTF-8
+
+2localhost.org.apache.juli.AsyncFileHandler.level     = ALL
+2localhost.org.apache.juli.AsyncFileHandler.directory = ${catalina.base}/logs
+2localhost.org.apache.juli.AsyncFileHandler.prefix    = localhost.
+2localhost.org.apache.juli.AsyncFileHandler.maxDays   = 90
+2localhost.org.apache.juli.AsyncFileHandler.encoding  = UTF-8
+
+3manager.org.apache.juli.AsyncFileHandler.level     = ALL
+3manager.org.apache.juli.AsyncFileHandler.directory = ${catalina.base}/logs
+3manager.org.apache.juli.AsyncFileHandler.prefix    = manager.
+3manager.org.apache.juli.AsyncFileHandler.maxDays   = 90
+3manager.org.apache.juli.AsyncFileHandler.encoding  = UTF-8
+
+4host-manager.org.apache.juli.AsyncFileHandler.level     = ALL
+4host-manager.org.apache.juli.AsyncFileHandler.directory = ${catalina.base}/logs
+4host-manager.org.apache.juli.AsyncFileHandler.prefix    = host-manager.
+4host-manager.org.apache.juli.AsyncFileHandler.maxDays   = 90
+4host-manager.org.apache.juli.AsyncFileHandler.encoding  = UTF-8
+
+java.util.logging.ConsoleHandler.level     = ALL
+java.util.logging.ConsoleHandler.formatter = org.apache.juli.OneLineFormatter
+java.util.logging.ConsoleHandler.encoding  = UTF-8
+
+############################################################
+# Facility specific properties.
+############################################################
+
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].level    = INFO
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].handlers = \
+    2localhost.org.apache.juli.AsyncFileHandler
+
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/manager].level    = INFO
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/manager].handlers = \
+    3manager.org.apache.juli.AsyncFileHandler
+
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/host-manager].level    = INFO
+org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/host-manager].handlers = \
+    4host-manager.org.apache.juli.AsyncFileHandler
+```
+
+Key concepts:
+
+- **Handlers** are output destinations. `AsyncFileHandler` writes to a rotating file; `ConsoleHandler` writes to `stdout`.
+- **Loggers** are named hierarchically by Java class name. The `ContainerBase` logger names encode the Engine, Host, and context path, allowing per-context log routing.
+- The `maxDays` property on `AsyncFileHandler` controls automatic file retention (90 days by default).
+- The numeric prefix on handler names (e.g., `1catalina`) is just a naming convention to allow multiple instances of the same handler class.
+
+To enable debug logging for a specific Tomcat subsystem, add a logger entry to `conf/logging.properties`:
+
+```properties
+# Debug HTTP/2 handling
+org.apache.coyote.http2.level = FINE
+
+# Trace lifecycle state changes for all components
+org.apache.catalina.util.LifecycleBase.level = FINE
+```
+
+## Log Files
+
+By default, Tomcat writes the following log files to the `$CATALINA_BASE/logs/` directory:
+
+| File | Contents |
+|------|----------|
+| `catalina.out` | All console output; `startup.sh` redirects stdout/stderr here |
+| `catalina.YYYY-MM-DD.log` | Catalina engine log (startup, shutdown, internal errors) |
+| `localhost.YYYY-MM-DD.log` | Virtual host-level events (deployment, context startup errors) |
+| `manager.YYYY-MM-DD.log` | Manager application request and audit log |
+| `host-manager.YYYY-MM-DD.log` | Host Manager application log |
+| `localhost_access_log.YYYY-MM-DD.txt` | HTTP access log written by `AccessLogValve` (default pattern) |
+
+`catalina.out` is not managed by JULI — it is a redirection artifact of the `catalina.sh` startup script and will grow without bound unless you configure external rotation with `logrotate` or equivalent.
+
+## Per-Application Logging
+
+Each web application can carry its own `logging.properties` file at `WEB-INF/classes/logging.properties`. JULI loads this file using the webapp's `ClassLoader`, so loggers and handlers defined there are scoped to that application and do not interfere with other applications or with Tomcat's system loggers.
+
+A minimal per-application `logging.properties`:
+
+```properties
+# WEB-INF/classes/logging.properties
+
+handlers = org.apache.juli.FileHandler
+
+org.apache.juli.FileHandler.level     = INFO
+org.apache.juli.FileHandler.directory = ${catalina.base}/logs
+org.apache.juli.FileHandler.prefix    = myapp.
+
+# Set the application root logger level
+com.example.myapp.level = INFO
+```
+
+When the application is undeployed, JULI closes and removes all handlers registered under that webapp's class loader, preventing resource leaks.
+
+## AccessLogValve
+
+`AccessLogValve` (`org.apache.catalina.valves.AccessLogValve`) records every HTTP request processed by Tomcat in a configurable format. It is configured as a `<Valve>` child element of `<Host>` or `<Context>` in `server.xml`.
+
+### Key Attributes
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `directory` | `logs` | Directory where log files are written (relative to `$CATALINA_BASE`) |
+| `prefix` | `access_log` | Filename prefix |
+| `suffix` | `""` (empty) | Filename suffix appended after the date stamp |
+| `pattern` | `common` | Log format pattern string, or `common` / `combined` alias |
+| `rotatable` | `true` | Rotate the file daily |
+| `fileDateFormat` | `.yyyy-MM-dd` | Date format inserted into the filename on rotation |
+| `buffered` | `true` | Buffer writes for performance; flush on rotation |
+| `conditionIf` | — | Only log if this request attribute is set |
+| `conditionUnless` | — | Skip logging if this request attribute is set |
+| `encoding` | `UTF-8` | Character encoding for the log file |
+
+### Pattern Tokens
+
+| Token | Description |
+|-------|-------------|
+| `%h` | Remote host name (or IP if DNS lookups are disabled) |
+| `%l` | Remote logical username (always `-`) |
+| `%u` | Remote authenticated username |
+| `%t` | Request timestamp in Common Log Format |
+| `%r` | First line of the HTTP request |
+| `%s` | HTTP response status code |
+| `%b` | Response body bytes sent (excluding headers); `-` if zero |
+| `%D` | Request processing time in milliseconds |
+| `%T` | Request processing time in seconds |
+| `%{Header}i` | Incoming request header value |
+| `%{Header}o` | Outgoing response header value |
+| `%{Cookie}c` | Cookie value |
+| `%q` | Query string (including leading `?`) |
+| `%U` | Request URI path |
+| `%v` | Local server name |
+
+The built-in aliases `common` and `combined` expand to standard formats:
+
+```
+common   → %h %l %u %t "%r" %s %b
+combined → %h %l %u %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"
+```
+
+### Example Configuration
+
+```xml
+<!-- Combined log format with millisecond response time -->
+<Valve className="org.apache.catalina.valves.AccessLogValve"
+       directory="logs"
+       prefix="access_log"
+       suffix=".txt"
+       pattern="%h %l %u %t &quot;%r&quot; %s %b %D &quot;%{Referer}i&quot; &quot;%{User-Agent}i&quot;"
+       rotatable="true"
+       fileDateFormat=".yyyy-MM-dd"
+       buffered="true"/>
+```
+
+### Conditional Logging
+
+To skip logging health-check requests (e.g., from a load balancer), use `conditionUnless`:
+
+```xml
+<!-- Set the attribute in a Filter, then skip it in access log -->
+<Valve className="org.apache.catalina.valves.AccessLogValve"
+       pattern="combined"
+       conditionUnless="skipAccessLog"/>
+```
+
+In a servlet filter, set `request.setAttribute("skipAccessLog", "true")` to suppress logging for matched requests.
+
+## JSON Access Logging
+
+`JsonAccessLogValve` (`org.apache.catalina.valves.JsonAccessLogValve`) extends `AccessLogValve` and serializes each log entry as a JSON object. This makes log output directly consumable by log aggregation pipelines without a parsing step.
+
+Pattern tokens are mapped to JSON field names (e.g., `%h` → `host`, `%s` → `statusCode`, `%D` → `elapsedTime`, `%{User-Agent}i` → `requestHeaders`).
+
+```xml
+<Valve className="org.apache.catalina.valves.JsonAccessLogValve"
+       directory="logs"
+       prefix="access_log_json"
+       suffix=".log"
+       pattern="%h %l %u %t %r %s %b %D %{Referer}i %{User-Agent}i"
+       rotatable="true"/>
+```
+
+Example output:
+
+```json
+{"host":"192.168.1.10","logicalUserName":"-","user":"-","time":"2024-06-01T12:34:56.789Z","request":"GET /api/users HTTP/1.1","statusCode":200,"size":1482,"elapsedTime":23,"requestHeaders":{"referer":"-","user-agent":"curl/8.4.0"}}
+```
+
+<Tip>
+  JSON access logs pair naturally with log aggregation platforms such as the Elastic Stack (Filebeat → Elasticsearch → Kibana), Splunk, or Grafana Loki. Each log line is a self-describing document, eliminating the need for Grok patterns or custom parsing rules. Set `buffered="false"` if you need near-real-time delivery to log shippers.
+</Tip>
+
+## ExtendedAccessLogValve
+
+`ExtendedAccessLogValve` (`org.apache.catalina.valves.ExtendedAccessLogValve`) implements the W3C Extended Log File Format, which adds structured field declarations to the log header and supports a richer set of fields than the Common Log Format.
+
+Supported fields include `c-dns`, `c-ip`, `cs-method`, `cs-uri`, `cs-uri-stem`, `cs-uri-query`, `sc-status`, `bytes`, `time-taken`, `cs(xxx)` (request headers), `sc(xxx)` (response headers), and `x-threadname`.
+
+```xml
+<Valve className="org.apache.catalina.valves.ExtendedAccessLogValve"
+       directory="logs"
+       prefix="extended_access_log"
+       suffix=".log"
+       pattern="date time c-ip cs-method cs-uri-stem cs-uri-query sc-status bytes time-taken cs(User-Agent) cs(Referer)"
+       rotatable="true"/>
+```
+
+Example output:
+
+```
+#Version: 1.0
+#Date: 2024-06-01 12:00:00
+#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query sc-status bytes time-taken cs(User-Agent) cs(Referer)
+2024-06-01 12:34:56 192.168.1.10 GET /api/users - 200 1482 0.023 curl/8.4.0 -
+```
+
+## Log Rotation
+
+**Access logs** are rotated daily by `AccessLogValve` based on the `fileDateFormat` attribute. The current log file is named `<prefix><fileDateFormat><suffix>` (e.g., `access_log.2024-06-01.txt`). When `rotatable="true"`, a new file is opened automatically at midnight.
+
+For more granular rotation (e.g., hourly), change `fileDateFormat`:
+
+```xml
+<Valve className="org.apache.catalina.valves.AccessLogValve"
+       fileDateFormat=".yyyy-MM-dd.HH"
+       .../>
+```
+
+**System logs** managed by `AsyncFileHandler` rotate daily based on the date suffix in the filename. Retention is controlled by `maxDays` in `conf/logging.properties` (default: 90 days). Files older than `maxDays` are deleted automatically.
+
+**`catalina.out`** does not rotate automatically. On Linux, integrate it with `logrotate`:
+
+```
+# /etc/logrotate.d/tomcat
+/opt/tomcat/logs/catalina.out {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+The `copytruncate` directive is important: it copies the file and then truncates the original in-place, rather than renaming it, so Tomcat's open file descriptor remains valid.

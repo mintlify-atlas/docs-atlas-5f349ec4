@@ -1,0 +1,284 @@
+---
+title: "WebSocket Support in Apache Tomcat"
+sidebarTitle: "WebSockets"
+description: "Implement Jakarta WebSocket 2.2 endpoints in Tomcat using @ServerEndpoint and programmatic registration. Configure sessions, message handlers, encoders, decoders, and SSL."
+---
+
+Tomcat implements Jakarta WebSocket 2.2 through its `org.apache.tomcat.websocket` module. The `WsSci` (`jakarta.servlet.ServletContainerInitializer`) automatically registers WebSocket infrastructure on startup — no additional servlet configuration is required. WebSocket endpoints can be created using the `@ServerEndpoint` annotation or by extending `jakarta.websocket.Endpoint` programmatically.
+
+## WebSocket Dependency
+
+For standard WAR deployments to Tomcat, WebSocket support is built in — no additional dependency is needed in your application's `pom.xml`. For embedded Tomcat or testing, add:
+
+```xml pom.xml
+<dependency>
+    <groupId>org.apache.tomcat.embed</groupId>
+    <artifactId>tomcat-embed-websocket</artifactId>
+    <version>11.0.x</version>
+</dependency>
+```
+
+Add the Jakarta WebSocket API as a provided dependency:
+
+```xml pom.xml
+<dependency>
+    <groupId>jakarta.websocket</groupId>
+    <artifactId>jakarta.websocket-api</artifactId>
+    <version>2.2.0</version>
+    <scope>provided</scope>
+</dependency>
+```
+
+## Annotation-Based Endpoint
+
+Use `@ServerEndpoint` to declare a WebSocket endpoint. Annotate handler methods with `@OnOpen`, `@OnMessage`, `@OnClose`, and `@OnError`.
+
+```java ChatEndpoint.java lines
+import jakarta.websocket.*;
+import jakarta.websocket.server.ServerEndpoint;
+import java.io.IOException;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
+
+@ServerEndpoint("/chat")
+public class ChatEndpoint {
+
+    private static final Set<Session> sessions = new CopyOnWriteArraySet<>();
+
+    @OnOpen
+    public void onOpen(Session session) {
+        sessions.add(session);
+        System.out.println("Connection opened: " + session.getId()
+            + " (total: " + sessions.size() + ")");
+    }
+
+    @OnMessage
+    public void onMessage(String message, Session sender) throws IOException {
+        // Broadcast to all connected clients
+        for (Session session : sessions) {
+            if (session.isOpen()) {
+                session.getBasicRemote().sendText(sender.getId() + ": " + message);
+            }
+        }
+    }
+
+    @OnClose
+    public void onClose(Session session, CloseReason reason) {
+        sessions.remove(session);
+        System.out.println("Connection closed: " + reason.getReasonPhrase());
+    }
+
+    @OnError
+    public void onError(Session session, Throwable throwable) {
+        sessions.remove(session);
+        throwable.printStackTrace();
+    }
+}
+```
+
+<Note>
+  Tomcat calls `@OnMessage` methods serially for the same `Session` — concurrent delivery to a single session is not possible. However, different sessions can be handled concurrently by different threads.
+</Note>
+
+## Path Parameters
+
+Extract path variables from the endpoint URI using `@PathParam`:
+
+```java
+@ServerEndpoint("/rooms/{roomId}/users/{userId}")
+public class RoomEndpoint {
+
+    @OnOpen
+    public void onOpen(Session session,
+                       @PathParam("roomId") String roomId,
+                       @PathParam("userId") String userId) {
+        System.out.println("User " + userId + " joined room " + roomId);
+    }
+}
+```
+
+## Programmatic Endpoint Registration
+
+For more control over endpoint configuration, implement `ServerApplicationConfig`:
+
+```java MyServerApplicationConfig.java lines
+import jakarta.websocket.server.ServerApplicationConfig;
+import jakarta.websocket.server.ServerEndpointConfig;
+import java.util.HashSet;
+import java.util.Set;
+
+public class MyServerApplicationConfig implements ServerApplicationConfig {
+
+    @Override
+    public Set<ServerEndpointConfig> getEndpointConfigs(Set<Class<? extends Endpoint>> endpointClasses) {
+        Set<ServerEndpointConfig> configs = new HashSet<>();
+        configs.add(ServerEndpointConfig.Builder
+            .create(MyEndpoint.class, "/ws/data")
+            .configurator(new MyEndpointConfigurator())
+            .build());
+        return configs;
+    }
+
+    @Override
+    public Set<Class<?>> getAnnotatedEndpointClasses(Set<Class<?>> scanned) {
+        // Return scanned classes to also register annotation-based endpoints
+        return scanned;
+    }
+}
+```
+
+## Message Types and Handlers
+
+`@OnMessage` supports these parameter types:
+
+| Message type | Java parameter type |
+|--------------|---------------------|
+| Text (complete) | `String` |
+| Text (streaming) | `Reader` |
+| Binary (complete) | `ByteBuffer` or `byte[]` |
+| Binary (streaming) | `InputStream` |
+| Pong | `PongMessage` |
+
+Limit the maximum message size to prevent out-of-memory conditions:
+
+```java
+@OnMessage(maxMessageSize = 65536)
+public void onMessage(String message, Session session) { ... }
+```
+
+## Sending Messages
+
+Use `Session.getBasicRemote()` for synchronous sends and `Session.getAsyncRemote()` for non-blocking sends:
+
+```java
+// Synchronous — blocks until message is sent
+session.getBasicRemote().sendText("Hello");
+session.getBasicRemote().sendBinary(ByteBuffer.wrap(data));
+
+// Asynchronous — returns immediately
+Future<Void> future = session.getAsyncRemote().sendText("Hello");
+
+// Streaming text (partial messages)
+session.getBasicRemote().sendText("Hello", false); // isLast=false
+session.getBasicRemote().sendText(" World", true);  // isLast=true
+```
+
+## Encoders and Decoders
+
+Encode and decode Java objects to WebSocket messages by implementing `Encoder.Text<T>` and `Decoder.Text<T>`:
+
+```java JsonEncoder.java lines
+import jakarta.websocket.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class JsonEncoder implements Encoder.Text<MyMessage> {
+
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    @Override
+    public String encode(MyMessage object) throws EncodeException {
+        try {
+            return mapper.writeValueAsString(object);
+        } catch (Exception e) {
+            throw new EncodeException(object, "JSON encoding failed", e);
+        }
+    }
+
+    @Override public void init(EndpointConfig config) {}
+    @Override public void destroy() {}
+}
+```
+
+Register encoders and decoders on the endpoint:
+
+```java
+@ServerEndpoint(
+    value = "/api",
+    encoders = { JsonEncoder.class },
+    decoders = { JsonDecoder.class }
+)
+public class ApiEndpoint {
+    @OnMessage
+    public MyMessage handleMessage(MyMessage msg, Session session) {
+        // Return value is automatically encoded and sent to the client
+        return new MyMessage("Received: " + msg.getText());
+    }
+}
+```
+
+## Session Configuration
+
+Configure session timeouts and limits:
+
+```java
+@OnOpen
+public void onOpen(Session session) {
+    // Idle timeout in milliseconds; 0 = never
+    session.setMaxIdleTimeout(60_000);
+
+    // Max text message size in bytes
+    session.setMaxTextMessageBufferSize(65536);
+
+    // Max binary message size in bytes
+    session.setMaxBinaryMessageBufferSize(65536);
+}
+```
+
+<Tip>
+  Always set `maxIdleTimeout` to a reasonable value (e.g., 60,000 ms). Without it, clients that disconnect without sending a Close frame will leave a `Session` open indefinitely, eventually exhausting server resources.
+</Tip>
+
+## WebSocket Client
+
+Tomcat provides a full WebSocket client implementation via `WsWebSocketContainer`:
+
+```java WebSocketClient.java lines
+import jakarta.websocket.*;
+import org.apache.tomcat.websocket.WsWebSocketContainer;
+import java.net.URI;
+
+@ClientEndpoint
+public class MyClientEndpoint {
+
+    @OnOpen
+    public void onOpen(Session session) throws IOException {
+        session.getBasicRemote().sendText("Hello from client!");
+    }
+
+    @OnMessage
+    public void onMessage(String message) {
+        System.out.println("Received: " + message);
+    }
+}
+
+// Connect to a server
+WebSocketContainer container = ContainerProvider.getWebSocketContainer();
+Session session = container.connectToServer(
+    MyClientEndpoint.class,
+    URI.create("ws://example.com/chat")
+);
+```
+
+For `wss://` (WebSocket over TLS), the client uses the standard JVM truststore. Configure it via system properties:
+
+```bash
+-Djavax.net.ssl.trustStore=/path/to/truststore.jks
+-Djavax.net.ssl.trustStorePassword=changeit
+```
+
+## WebSocket over SSL (wss://)
+
+Server-side `wss://` requires no WebSocket-specific configuration. Simply configure an SSL Connector in `server.xml` as described in the [SSL/TLS guide](/security/ssl-tls). Tomcat automatically upgrades HTTP/HTTPS connections to `ws://`/`wss://` respectively.
+
+## Per-Message Compression (permessage-deflate)
+
+Tomcat supports the `permessage-deflate` WebSocket extension (RFC 7692) automatically. If the client advertises support, Tomcat negotiates and uses compression transparently. No configuration is required on the server side.
+
+<CardGroup cols={2}>
+  <Card title="Embedding Tomcat" icon="code" href="/advanced/embedding">
+    Add WebSocket endpoints to an embedded Tomcat instance.
+  </Card>
+  <Card title="SSL/TLS Configuration" icon="lock" href="/security/ssl-tls">
+    Configure wss:// by enabling an HTTPS connector.
+  </Card>
+</CardGroup>

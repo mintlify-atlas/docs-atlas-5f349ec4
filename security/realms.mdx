@@ -1,0 +1,349 @@
+---
+title: "Configuring Security Realms in Apache Tomcat"
+sidebarTitle: "Realms"
+description: "Configure Tomcat security realms to authenticate users: MemoryRealm, UserDatabaseRealm, DataSourceRealm, JNDIRealm, JAASRealm, CombinedRealm, and LockOutRealm."
+---
+
+A **Realm** provides authentication and role-based authorization for Tomcat web applications. It acts as the bridge between a user store (flat file, database, LDAP directory, or JAAS module) and Tomcat's container-managed security. Realms are configured in `conf/server.xml` by placing a `<Realm>` element inside a `<Server>`, `<Engine>`, `<Host>`, or `<Context>` element — the placement determines which applications share the Realm and at what scope credentials are looked up.
+
+## Realm Placement
+
+A `<Realm>` element can be nested at four different levels of the `server.xml` container hierarchy. Child containers inherit the parent Realm unless they define their own.
+
+| Placement | Scope |
+|-----------|-------|
+| Inside `<Engine>` | Shared by **all** virtual hosts and web applications in the Engine unless overridden at a lower level. This is the most common placement. |
+| Inside `<Host>` | Shared by all web applications deployed to that specific virtual host. Overrides any Engine-level Realm for that host. |
+| Inside `<Context>` | Used only by that single web application. Overrides Engine- and Host-level Realms. |
+| Inside `<Server>` | Available as a global Realm for management applications (rare). |
+
+The default `conf/server.xml` ships with the Realm placed inside the `<Engine>` element, wrapped by a `LockOutRealm` for brute-force protection:
+
+```xml
+<Engine name="Catalina" defaultHost="localhost">
+  <Realm className="org.apache.catalina.realm.LockOutRealm">
+    <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+           resourceName="UserDatabase"/>
+  </Realm>
+  ...
+</Engine>
+```
+
+---
+
+## MemoryRealm
+
+`MemoryRealm` reads user credentials and role assignments from an XML file at startup. By default it reads `conf/tomcat-users.xml`, matching the pathname field in the source:
+
+```java
+private String pathname = "conf/tomcat-users.xml";
+```
+
+The file is loaded once when Tomcat starts; changes require a restart to take effect.
+
+**Configuration:**
+
+```xml
+<Realm className="org.apache.catalina.realm.MemoryRealm"
+       pathname="conf/tomcat-users.xml" />
+```
+
+**Default `conf/tomcat-users.xml` structure:**
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<tomcat-users xmlns="http://tomcat.apache.org/xml"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:schemaLocation="http://tomcat.apache.org/xml tomcat-users.xsd"
+              version="1.0">
+
+  <role rolename="manager-gui"/>
+  <role rolename="tomcat"/>
+  <role rolename="role1"/>
+
+  <!-- Passwords must be changed before use -->
+  <user username="admin" password="s3cr3t!" roles="manager-gui"/>
+  <user username="tomcat" password="s3cr3t!" roles="tomcat"/>
+  <user username="both"   password="s3cr3t!" roles="tomcat,role1"/>
+</tomcat-users>
+```
+
+<Warning>
+`MemoryRealm` stores credentials in a plain-text XML file and holds all users in memory. It is convenient for development but **must not** be used in production without wrapping it in a `LockOutRealm`. Additionally, always use hashed passwords with a `CredentialHandler` rather than plain text.
+</Warning>
+
+---
+
+## UserDatabaseRealm
+
+`UserDatabaseRealm` authenticates against a JNDI `UserDatabase` resource defined in `<GlobalNamingResources>`. Unlike `MemoryRealm`, the `UserDatabase` resource can be edited at runtime through the Manager application and changes are immediately available.
+
+The default `server.xml` ships with this configuration:
+
+```xml
+<!-- In <GlobalNamingResources> -->
+<Resource name="UserDatabase" auth="Container"
+          type="org.apache.catalina.UserDatabase"
+          description="User database that can be updated and saved"
+          factory="org.apache.catalina.users.MemoryUserDatabaseFactory"
+          pathname="conf/tomcat-users.xml" />
+
+<!-- In <Engine> -->
+<Realm className="org.apache.catalina.realm.LockOutRealm">
+  <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+         resourceName="UserDatabase"/>
+</Realm>
+```
+
+The `resourceName` attribute must match the `name` attribute of the `<Resource>` element in `<GlobalNamingResources>`.
+
+---
+
+## DataSourceRealm
+
+`DataSourceRealm` authenticates users stored in a relational database accessed via a JDBC `DataSource`. It is the preferred Realm for applications that already manage users in a database.
+
+**Required attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `dataSourceName` | JNDI name of the `javax.sql.DataSource` resource |
+| `userTable` | Table containing user credentials |
+| `userNameCol` | Column holding the username |
+| `userCredCol` | Column holding the (hashed) password |
+| `userRoleTable` | Table mapping users to roles |
+| `roleNameCol` | Column holding the role name in `userRoleTable` |
+| `localDataSource` | `true` to look up the DataSource in the web application's context rather than globally (default `false`) |
+
+**Example schema:**
+
+```sql
+CREATE TABLE users (
+  user_name  VARCHAR(15)  NOT NULL PRIMARY KEY,
+  user_pass  VARCHAR(255) NOT NULL
+);
+
+CREATE TABLE user_roles (
+  user_name  VARCHAR(15) NOT NULL,
+  role_name  VARCHAR(15) NOT NULL,
+  PRIMARY KEY (user_name, role_name)
+);
+```
+
+**`server.xml` configuration:**
+
+```xml
+<Realm className="org.apache.catalina.realm.DataSourceRealm"
+       dataSourceName="jdbc/myAppDB"
+       userTable="users"
+       userNameCol="user_name"
+       userCredCol="user_pass"
+       userRoleTable="user_roles"
+       roleNameCol="role_name">
+  <CredentialHandler className="org.apache.catalina.realm.MessageDigestCredentialHandler"
+                     algorithm="SHA-256"/>
+</Realm>
+```
+
+The DataSource itself is declared separately, either as a global `<Resource>` or inside the application's `<Context>`.
+
+---
+
+## JNDIRealm
+
+`JNDIRealm` authenticates users against an LDAP or Active Directory server using the Java Naming and Directory Interface (JNDI) API. As described in the Javadoc, each authenticatable user is represented by an element in the directory context accessed via the `connectionURL` property.
+
+**Key attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `connectionURL` | LDAP server URL, e.g. `ldap://ldap.example.com:389` |
+| `userPattern` | DN pattern with `{0}` substituted by the username (simple bind approach) |
+| `userBase` | Base DN for user searches (alternative to `userPattern`) |
+| `userSearch` | LDAP filter for user searches, e.g. `(uid={0})` |
+| `userSubtree` | `true` to search the entire subtree (default `false`) |
+| `roleBase` | Base DN to search for roles |
+| `roleName` | LDAP attribute holding the role name, e.g. `cn` |
+| `roleSearch` | LDAP filter to find roles, e.g. `(member={0})` |
+| `connectionName` | DN used to bind for searching (leave empty for anonymous) |
+| `connectionPassword` | Password for `connectionName` |
+| `userPassword` | LDAP attribute holding the password (if empty, LDAP bind is used for authentication) |
+
+**Example — Active Directory with user search:**
+
+```xml
+<Realm className="org.apache.catalina.realm.JNDIRealm"
+       connectionURL="ldap://ad.example.com:389"
+       connectionName="cn=tomcat,cn=Users,dc=example,dc=com"
+       connectionPassword="bindPassword"
+       userBase="cn=Users,dc=example,dc=com"
+       userSearch="(sAMAccountName={0})"
+       userSubtree="true"
+       roleBase="cn=Groups,dc=example,dc=com"
+       roleName="cn"
+       roleSearch="(member={0})"
+       roleSubtree="true" />
+```
+
+**Example — OpenLDAP with userPattern (simple bind):**
+
+```xml
+<Realm className="org.apache.catalina.realm.JNDIRealm"
+       connectionURL="ldap://ldap.example.com:389"
+       userPattern="uid={0},ou=people,dc=example,dc=com"
+       roleBase="ou=groups,dc=example,dc=com"
+       roleName="cn"
+       roleSearch="(uniqueMember={0})" />
+```
+
+<Note>
+Use `ldaps://` or configure `StartTlsRequest` via the `useTls` attribute to encrypt the LDAP connection. Sending bind passwords over plain LDAP is a security risk.
+</Note>
+
+---
+
+## JAASRealm
+
+`JAASRealm` delegates authentication to a Java Authentication and Authorization Service (JAAS) `LoginModule`. This is the most flexible option because any existing JAAS module (Kerberos, smart-card, custom database, etc.) can be plugged in without modifying Tomcat.
+
+The `appName` attribute is passed to `javax.security.auth.login.LoginContext` to select the named entry in the JAAS login configuration file. Tomcat then examines the `Subject` returned by the `LoginModule` and maps its `Principal` objects to a user identity and security roles using the `userClassNames` and `roleClassNames` attributes.
+
+```xml
+<Realm className="org.apache.catalina.realm.JAASRealm"
+       appName="TomcatLogin"
+       userClassNames="com.example.security.UserPrincipal"
+       roleClassNames="com.example.security.RolePrincipal" />
+```
+
+**JAAS login configuration file (`conf/jaas.config`):**
+
+```
+TomcatLogin {
+    com.example.security.DatabaseLoginModule required
+        dbDriver="com.mysql.jdbc.Driver"
+        dbURL="jdbc:mysql://localhost/userdb"
+        dbUser="tomcat"
+        dbPassword="secret";
+};
+```
+
+Tell the JVM about the configuration file by adding to `CATALINA_OPTS`:
+
+```bash
+-Djava.security.auth.login.config="${CATALINA_HOME}/conf/jaas.config"
+```
+
+---
+
+## CombinedRealm
+
+`CombinedRealm` chains multiple Realms together. Authentication is attempted against each nested Realm in declaration order; the first successful authentication wins. This is useful when migrating from one user store to another or when different classes of users are stored in different systems.
+
+As shown in the source, `CombinedRealm` maintains an ordered `List<Realm>` and adds each nested `<Realm>` child element via `addRealm()`.
+
+```xml
+<Realm className="org.apache.catalina.realm.CombinedRealm">
+  <!-- Try the local file first (e.g. for service accounts) -->
+  <Realm className="org.apache.catalina.realm.MemoryRealm"
+         pathname="conf/service-accounts.xml" />
+  <!-- Fall back to LDAP for all other users -->
+  <Realm className="org.apache.catalina.realm.JNDIRealm"
+         connectionURL="ldap://ldap.example.com:389"
+         userPattern="uid={0},ou=people,dc=example,dc=com"
+         roleBase="ou=groups,dc=example,dc=com"
+         roleName="cn"
+         roleSearch="(uniqueMember={0})" />
+</Realm>
+```
+
+<Note>
+Usernames must be unique across all combined realms. If the same username exists in two nested realms the first realm's credentials take precedence.
+</Note>
+
+---
+
+## LockOutRealm
+
+`LockOutRealm` extends `CombinedRealm` to add brute-force protection. It tracks failed login attempts per username and temporarily locks out accounts that exceed the failure threshold. Importantly, it records attempts for **non-existent** usernames too, preventing attackers from distinguishing valid usernames through timing differences.
+
+**Attributes (with defaults from source):**
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `failureCount` | `5` | Number of consecutive failures before lockout |
+| `lockOutTime` | `300` | Seconds a user is locked out after exceeding `failureCount` |
+| `cacheSize` | `1000` | Maximum number of failed-user entries to keep in the cache |
+| `cacheRemovalWarningTime` | `3600` | Log a warning if a failed-user entry is evicted from cache before this many seconds have elapsed |
+
+`LockOutRealm` is the **default outer wrapper** in `conf/server.xml`:
+
+```xml
+<Realm className="org.apache.catalina.realm.LockOutRealm"
+       failureCount="5"
+       lockOutTime="300"
+       cacheSize="1000">
+  <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+         resourceName="UserDatabase"/>
+</Realm>
+```
+
+Any Realm type can be nested inside `LockOutRealm`, including `CombinedRealm`, `DataSourceRealm`, or `JNDIRealm`.
+
+---
+
+## Credential Handlers
+
+Credential handlers tell Tomcat how stored passwords are encoded so it can verify them against user-supplied passwords. They are configured as child elements of the `<Realm>`.
+
+### MessageDigestCredentialHandler
+
+`MessageDigestCredentialHandler` supports hex-encoded digests as well as the `{MD5}`, `{SHA}`, and `{SSHA}` prefix formats commonly used by LDAP directories. Supported forms from the Javadoc:
+
+- `encodedCredential` — hex-encoded digest
+- `{MD5}encodedCredential` — Base64-encoded MD5 digest
+- `{SHA}encodedCredential` — Base64-encoded SHA-1 digest
+- `{SSHA}encodedCredential` — 20-byte SHA-1 digest + salt (Base64)
+- `salt$iterationCount$encodedCredential` — salted, iterated hex digest
+
+```xml
+<Realm className="org.apache.catalina.realm.DataSourceRealm" ...>
+  <CredentialHandler
+      className="org.apache.catalina.realm.MessageDigestCredentialHandler"
+      algorithm="SHA-256"
+      iterations="100000"
+      saltLength="16" />
+</Realm>
+```
+
+### SecretKeyCredentialHandler
+
+`SecretKeyCredentialHandler` uses PBKDF2 key derivation (e.g. `PBKDF2WithHmacSHA256`), which is the most resistant option against offline dictionary attacks.
+
+```xml
+<CredentialHandler
+    className="org.apache.catalina.realm.SecretKeyCredentialHandler"
+    algorithm="PBKDF2WithHmacSHA256"
+    iterations="100000"
+    keyLength="256"
+    saltLength="16" />
+```
+
+### Generating Hashed Passwords with `digest.sh`
+
+Tomcat ships a `digest.sh` utility (`digest.bat` on Windows) to pre-hash passwords so they are never stored in plain text:
+
+```bash
+# Generate a SHA-256 digest with salt and 100000 iterations
+$CATALINA_HOME/bin/digest.sh \
+  -a SHA-256 \
+  -i 100000 \
+  -s 16 \
+  -e UTF-8 \
+  myPlainTextPassword
+```
+
+Copy the output hash into the `password` attribute of the `<user>` element in `tomcat-users.xml` or into the database.
+
+<Warning>
+Never store plain-text passwords in `tomcat-users.xml` or your database. Always configure a `CredentialHandler` and use `digest.sh` to pre-hash all passwords before deploying to production.
+</Warning>

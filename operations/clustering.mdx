@@ -1,0 +1,267 @@
+---
+title: "High-Availability Clustering with Apache Tomcat"
+sidebarTitle: "Clustering"
+description: "Configure session replication and high-availability clusters in Tomcat using SimpleTcpCluster, DeltaManager, and BackupManager. Covers static and dynamic membership."
+---
+
+Tomcat supports session replication across a cluster of nodes using `SimpleTcpCluster`. When a user's session data is replicated to other nodes, any member of the cluster can service subsequent requests without data loss if the original node fails. Clustered deployments require that all session attributes implement `java.io.Serializable`, a load balancer in front of the cluster (such as Apache HTTP Server with `mod_jk` or `mod_proxy_balancer`), and a consistent application deployment across every node in the cluster.
+
+## Requirements
+
+Before enabling clustering, verify that your environment meets the following prerequisites:
+
+<Steps>
+  <Step title="Serializable Session Attributes">
+    Every object stored in `HttpSession` — directly or transitively — must implement `java.io.Serializable`. Non-serializable attributes will cause replication to fail with a serialization exception at runtime.
+  </Step>
+  <Step title="Consistent Application Deployment">
+    The same version of your web application must be deployed at the same context path on every cluster node. Session data is replicated as binary-serialized Java objects; class mismatches between nodes will produce `ClassNotFoundException` or `InvalidClassException`.
+  </Step>
+  <Step title="Load Balancer with Sticky Sessions">
+    A load balancer should be configured to route subsequent requests from the same client to the same Tomcat node (sticky sessions). Set the `jvmRoute` attribute on the `<Engine>` element so the load balancer can identify which node owns a session from the session ID itself.
+  </Step>
+  <Step title="Network Multicast or Static Membership">
+    Cluster nodes discover each other via multicast (default) or via a static member list. Ensure that UDP multicast is enabled on your network, or configure `StaticMembershipInterceptor` if multicast is blocked (common in cloud and container environments).
+  </Step>
+</Steps>
+
+## Basic Cluster Configuration
+
+The minimal cluster configuration is a single line inside the `<Engine>` element in `conf/server.xml`:
+
+```xml
+<Engine name="Catalina" defaultHost="localhost" jvmRoute="jvm1">
+
+  <Cluster className="org.apache.catalina.ha.tcp.SimpleTcpCluster"/>
+
+  <Host name="localhost" appBase="webapps"
+        unpackWARs="true" autoDeploy="true">
+    ...
+  </Host>
+</Engine>
+```
+
+This minimal form defaults to:
+- **Session Manager**: `DeltaManager` (full session delta replication to all nodes)
+- **Membership**: `McastService` using multicast group `228.0.0.4:45564`
+- **Receiver**: `NioReceiver` listening on `auto` (first available port in the range `4000–4100`)
+- **Sender**: `ReplicationTransmitter` with `PooledParallelSender`
+
+## SimpleTcpCluster
+
+`SimpleTcpCluster` (`org.apache.catalina.ha.tcp.SimpleTcpCluster`) is the primary clustering implementation. It orchestrates the `Channel` (the underlying communication fabric), the session manager, and cluster-aware valves.
+
+A fully expanded configuration with explicit sub-components looks like this:
+
+```xml
+<Cluster className="org.apache.catalina.ha.tcp.SimpleTcpCluster"
+         channelSendOptions="8">
+
+  <Manager className="org.apache.catalina.ha.session.DeltaManager"
+           expireSessionsOnShutdown="false"
+           notifyListenersOnReplication="true"/>
+
+  <Channel className="org.apache.catalina.tribes.group.GroupChannel">
+
+    <Membership className="org.apache.catalina.tribes.membership.McastService"
+                address="228.0.0.4"
+                port="45564"
+                frequency="500"
+                dropTime="3000"/>
+
+    <Receiver className="org.apache.catalina.tribes.transport.nio.NioReceiver"
+              address="auto"
+              port="4000"
+              autoBind="100"
+              selectorTimeout="5000"
+              maxThreads="6"/>
+
+    <Sender className="org.apache.catalina.tribes.transport.ReplicationTransmitter">
+      <Transport className="org.apache.catalina.tribes.transport.nio.PooledParallelSender"/>
+    </Sender>
+
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.TcpFailureDetector"/>
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.MessageDispatchInterceptor"/>
+  </Channel>
+
+  <Valve className="org.apache.catalina.ha.tcp.ReplicationValve" filter=""/>
+  <Valve className="org.apache.catalina.ha.session.JvmRouteBinderValve"/>
+
+  <ClusterListener className="org.apache.catalina.ha.session.ClusterSessionListener"/>
+</Cluster>
+```
+
+Key `SimpleTcpCluster` attributes:
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `channelSendOptions` | `8` | Bit-field controlling message delivery guarantees. `8` = `SEND_OPTIONS_SYNCHRONIZED_ACK` (synchronous, acknowledged delivery) |
+| `channelStartOptions` | `15` | Which Channel services to start (bitmask; `15` = all) |
+| `heartbeatBackgroundEnabled` | `false` | Run `Channel.heartbeat()` in the container background thread |
+
+## Session Managers
+
+### DeltaManager (Default)
+
+`DeltaManager` replicates **session deltas** — only the attributes changed during a request — to **all other cluster nodes**. Every node maintains a complete copy of every session in the cluster.
+
+```xml
+<Manager className="org.apache.catalina.ha.session.DeltaManager"
+         expireSessionsOnShutdown="false"
+         notifyListenersOnReplication="true"
+         stateTransferTimeout="60"/>
+```
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `expireSessionsOnShutdown` | `false` | Expire all sessions when the node shuts down (instead of replicating the shutdown) |
+| `notifyListenersOnReplication` | `true` | Fire `HttpSessionAttributeListener` events on replication receipt |
+| `stateTransferTimeout` | `60` | Seconds to wait for full state transfer when joining the cluster |
+
+**Best for:** Small to medium clusters (2–6 nodes) where full replication overhead is acceptable.
+
+### BackupManager
+
+`BackupManager` replicates each session to exactly **one backup node** (chosen consistently by hashing the session ID). This dramatically reduces network traffic in large clusters because only one other node receives each session's data.
+
+```xml
+<Manager className="org.apache.catalina.ha.session.BackupManager"
+         expireSessionsOnShutdown="false"
+         notifyListenersOnReplication="true"
+         mapSendOptions="6"/>
+```
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `mapSendOptions` | `6` | Delivery options for the distributed map used to locate session backups |
+
+**Best for:** Larger clusters (6+ nodes) or when session data is large, since replication traffic scales with cluster size under `DeltaManager`.
+
+<Note>
+  `BackupManager` requires that the load balancer support session-aware routing or sticky sessions. If a request arrives at a node that is neither the primary nor the backup for that session, an additional network hop is required to retrieve the session. This is transparent to the application but adds latency.
+</Note>
+
+## Membership: Multicast vs. Static
+
+### Multicast Membership (Default)
+
+`McastService` uses UDP multicast for automatic node discovery. Nodes broadcast their presence to the configured multicast group and listen for other nodes' announcements.
+
+```xml
+<Membership className="org.apache.catalina.tribes.membership.McastService"
+            address="228.0.0.4"
+            port="45564"
+            frequency="500"
+            dropTime="3000"/>
+```
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `address` | `228.0.0.4` | Multicast group IP address |
+| `port` | `45564` | Multicast port |
+| `frequency` | `500` | How often (ms) to send membership heartbeats |
+| `dropTime` | `3000` | Milliseconds without a heartbeat before a member is considered dead |
+
+<Warning>
+  UDP multicast is frequently blocked or not supported in cloud environments (AWS, GCP, Azure) and container orchestration platforms (Kubernetes, Docker Swarm). If your cluster nodes cannot communicate via multicast, cluster membership will silently fail and sessions will not replicate. Use `StaticMembershipInterceptor` in these environments instead.
+</Warning>
+
+### Static Membership
+
+When multicast is unavailable, replace `McastService` with `StaticMembershipService` and enumerate cluster nodes explicitly using `StaticMembershipInterceptor`:
+
+```xml
+<Channel className="org.apache.catalina.tribes.group.GroupChannel">
+
+  <!-- No McastService — use static membership instead -->
+  <Membership className="org.apache.catalina.tribes.membership.cloud.CloudMembershipService"
+              membershipProviderClassName="org.apache.catalina.tribes.membership.StaticMembershipProvider"/>
+
+  <Receiver className="org.apache.catalina.tribes.transport.nio.NioReceiver"
+            address="auto"
+            port="4000"
+            autoBind="100"/>
+
+  <Sender className="org.apache.catalina.tribes.transport.ReplicationTransmitter">
+    <Transport className="org.apache.catalina.tribes.transport.nio.PooledParallelSender"/>
+  </Sender>
+
+  <Interceptor className="org.apache.catalina.tribes.group.interceptors.StaticMembershipInterceptor">
+    <!-- List all cluster nodes explicitly -->
+    <Member className="org.apache.catalina.tribes.membership.StaticMember"
+            host="tomcat-node-1.internal"
+            port="4000"
+            uniqueId="{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1}"/>
+    <Member className="org.apache.catalina.tribes.membership.StaticMember"
+            host="tomcat-node-2.internal"
+            port="4000"
+            uniqueId="{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2}"/>
+  </Interceptor>
+
+  <Interceptor className="org.apache.catalina.tribes.group.interceptors.TcpFailureDetector"/>
+  <Interceptor className="org.apache.catalina.tribes.group.interceptors.MessageDispatchInterceptor"/>
+</Channel>
+```
+
+Each `StaticMember` requires a `uniqueId` that is globally unique within the cluster — use distinct byte values in the last position for each node.
+
+## jvmRoute for Load Balancer Affinity
+
+The `jvmRoute` attribute on the `<Engine>` element causes Tomcat to append a node identifier to every session ID it creates. For example, if `jvmRoute="jvm1"`, a session ID might look like `B7C3A9D1E2F4.jvm1`.
+
+```xml
+<Engine name="Catalina" defaultHost="localhost" jvmRoute="jvm1">
+```
+
+The load balancer reads the suffix after the last `.` to determine which node owns the session and routes subsequent requests there. Each node in the cluster must have a unique `jvmRoute` value.
+
+In Apache HTTP Server with `mod_proxy_balancer`:
+
+```apache
+<Proxy "balancer://tomcatcluster">
+    BalancerMember "http://node1:8080" route=jvm1
+    BalancerMember "http://node2:8080" route=jvm2
+    ProxySet stickysession=JSESSIONID|jsessionid
+</Proxy>
+
+ProxyPass        "/myapp" "balancer://tomcatcluster/myapp"
+ProxyPassReverse "/myapp" "balancer://tomcatcluster/myapp"
+```
+
+## Web Application Clustering Support
+
+A web application must explicitly opt in to session replication by declaring itself distributable in `WEB-INF/web.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+           https://jakarta.ee/xml/ns/jakartaee/web-app_6_0.xsd"
+         version="6.0">
+
+  <!-- Enable session replication for this application -->
+  <distributable/>
+
+  ...
+</web-app>
+```
+
+Without `<distributable/>`, Tomcat uses a non-replicated session manager even when a `<Cluster>` is configured.
+
+**Session attribute requirements:**
+- All session attributes must implement `java.io.Serializable`.
+- Objects referenced by session attributes (transitively) must also be serializable.
+- `transient` fields will not be replicated to other nodes.
+
+<Tip>
+  Test session serialization in a local two-node cluster before deploying to production. Write a simple integration test that creates a session on node A, then kills node A and verifies that the session is accessible on node B. Catching `NotSerializableException` failures early prevents production outages after failover.
+</Tip>
+
+## Cluster Communication Security
+
+By default, Tomcat cluster replication messages are transmitted over unencrypted TCP. In production environments — especially where cluster traffic crosses network boundaries — you should secure the replication channel.
+
+Configure TLS on the `NioReceiver` and `PooledParallelSender` by adding SSL configuration to the channel transport. Alternatively, run cluster replication over a dedicated encrypted overlay network (e.g., WireGuard or IPsec) to keep the Tomcat configuration simple while still protecting data in transit.
+
+For deployments on Kubernetes, running each cluster's pod-to-pod communication inside a service mesh (e.g., Istio with mTLS) provides transparent encryption without changes to `server.xml`.

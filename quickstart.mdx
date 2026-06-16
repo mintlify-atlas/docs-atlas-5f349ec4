@@ -1,47 +1,223 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Apache Tomcat in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Download Tomcat, set JAVA_HOME and CATALINA_HOME, start the server, and deploy your first web application — all in under five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through downloading Apache Tomcat, configuring the required environment variables, starting the server, and deploying a simple WAR file. By the end you will have a running Tomcat instance accessible at `http://localhost:8080` and a working web application deployed from the `webapps/` directory.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  Apache Tomcat requires a **Java Standard Edition Runtime Environment (JRE) version 11 or later**. Download the latest JDK from [adoptium.net](https://adoptium.net) or [oracle.com/java](https://www.oracle.com/java/technologies/downloads/). The full JDK is recommended over a bare JRE because it provides additional startup options. Verify your installation with `java -version` before proceeding.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Download and Extract Tomcat">
+    Download the latest Tomcat binary distribution from [tomcat.apache.org](https://tomcat.apache.org). Choose the `.tar.gz` archive on Linux/macOS or the `.zip` archive on Windows.
 
     ```bash
-    npm install your-package
+    # Linux / macOS — extract to /opt
+    tar -xzf apache-tomcat-11.0.x.tar.gz -C /opt
+    ```
+
+    The extracted directory (e.g., `/opt/apache-tomcat-11.0.x`) is your **`CATALINA_HOME`** — the root of the Tomcat binary distribution. It contains all startup scripts, shared libraries, and default configuration files.
+
+    Your directory structure should look like this:
+
+    ```
+    apache-tomcat-11.0.x/
+    ├── bin/          ← startup.sh, shutdown.sh, catalina.sh
+    ├── conf/         ← server.xml, web.xml, tomcat-users.xml
+    ├── lib/          ← catalina.jar, servlet-api.jar, …
+    ├── logs/         ← catalina.out, access logs
+    ├── webapps/      ← ROOT, docs, examples (default apps)
+    ├── work/         ← JSP compilation cache
+    └── temp/         ← JVM temporary files
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Set Environment Variables">
+    Tomcat's startup scripts rely on two environment variables. `JAVA_HOME` points to your JDK installation and `CATALINA_HOME` points to the extracted Tomcat directory.
+
+    <CodeGroup>
+      ```bash Linux / macOS (~/.bash_profile or ~/.zshrc)
+      # Replace paths with your actual JDK and Tomcat locations
+      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+      export CATALINA_HOME=/opt/apache-tomcat-11.0.x
+
+      # Reload the profile in your current shell
+      source ~/.bash_profile
+      ```
+
+      ```batch Windows (System Environment Variables or setenv.bat)
+      :: Open a Command Prompt and run, or add to System Properties → Environment Variables
+      set "JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-21"
+      set "CATALINA_HOME=C:\apache-tomcat-11.0.x"
+
+      :: Persist them permanently via setx
+      setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-21"
+      setx CATALINA_HOME "C:\apache-tomcat-11.0.x"
+      ```
+    </CodeGroup>
+
+    <Note>
+      If both `JRE_HOME` and `JAVA_HOME` are set, Tomcat's startup scripts prefer `JRE_HOME`. Use `JAVA_HOME` for full JDK features. You can also place these exports in `$CATALINA_HOME/bin/setenv.sh` (Linux/macOS) or `%CATALINA_HOME%\bin\setenv.bat` (Windows) to keep them scoped to Tomcat.
+    </Note>
+  </Step>
+
+  <Step title="Start the Server">
+    Use the startup script provided in `$CATALINA_HOME/bin/`. The script starts Tomcat as a background process and writes output to `logs/catalina.out`.
+
+    <CodeGroup>
+      ```bash Linux / macOS
+      # Make scripts executable if they aren't already
+      chmod +x $CATALINA_HOME/bin/*.sh
+
+      # Start Tomcat
+      $CATALINA_HOME/bin/startup.sh
+
+      # Alternatively, run in the foreground (output goes to console)
+      $CATALINA_HOME/bin/catalina.sh run
+      ```
+
+      ```batch Windows
+      :: Start Tomcat
+      %CATALINA_HOME%\bin\startup.bat
+
+      :: Alternatively
+      %CATALINA_HOME%\bin\catalina.bat start
+      ```
+    </CodeGroup>
+
+    To stop Tomcat, use the matching shutdown script:
+
+    <CodeGroup>
+      ```bash Linux / macOS
+      $CATALINA_HOME/bin/shutdown.sh
+      ```
+
+      ```batch Windows
+      %CATALINA_HOME%\bin\shutdown.bat
+      ```
+    </CodeGroup>
+
+    Watch the log output to confirm a successful start:
 
     ```bash
-    your-cli init
+    tail -f $CATALINA_HOME/logs/catalina.out
+    ```
+
+    A successful startup ends with a line similar to:
+
+    ```
+    INFO [main] org.apache.catalina.startup.Catalina.start Server startup in [892] milliseconds
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Verify the Installation">
+    With Tomcat running, confirm that the default web application responds on port 8080:
 
     ```bash
-    your-cli start
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/
+    # Expected output: 200
+    ```
+
+    Open `http://localhost:8080` in a browser. You should see the Tomcat welcome page with links to documentation, examples, and the Manager application.
+
+    ```bash
+    # Check which process is bound to port 8080
+    ss -tlnp | grep 8080
+    # or on macOS:
+    lsof -i :8080
+    ```
+
+    <Note>
+      If port 8080 is already in use, edit `$CATALINA_HOME/conf/server.xml` and change the `port` attribute on the `<Connector>` element to any unused port above 1024. Restart Tomcat and use the new port in your browser URL.
+    </Note>
+  </Step>
+
+  <Step title="Deploy a Web Application">
+    The simplest deployment method is the **drop-in WAR** approach. Tomcat's default `<Host>` configuration sets `autoDeploy="true"`, which means Tomcat watches the `webapps/` directory and automatically deploys any `.war` file placed there — no restart required.
+
+    ```bash
+    # Copy your WAR to the webapps directory
+    cp myapp.war $CATALINA_HOME/webapps/
+
+    # Tomcat unpacks it to webapps/myapp/ and deploys it
+    # Access it at:
+    curl http://localhost:8080/myapp/
+    ```
+
+    For a minimal servlet application, your project must contain a `WEB-INF/web.xml` deployment descriptor. Here is the minimum structure and a sample `web.xml`:
+
+    ```
+    myapp/
+    ├── index.html               ← Static welcome page
+    └── WEB-INF/
+        ├── web.xml              ← Deployment descriptor
+        └── classes/
+            └── com/example/
+                └── HelloServlet.class
+    ```
+
+    ```xml
+    <?xml version="1.0" encoding="UTF-8"?>
+    <web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+               https://jakarta.ee/xml/ns/jakartaee/web-app_6_0.xsd"
+             version="6.0">
+
+      <servlet>
+        <servlet-name>HelloServlet</servlet-name>
+        <servlet-class>com.example.HelloServlet</servlet-class>
+      </servlet>
+
+      <servlet-mapping>
+        <servlet-name>HelloServlet</servlet-name>
+        <url-pattern>/hello</url-pattern>
+      </servlet-mapping>
+
+    </web-app>
+    ```
+
+    The corresponding servlet source:
+
+    ```java
+    package com.example;
+
+    import jakarta.servlet.http.HttpServlet;
+    import jakarta.servlet.http.HttpServletRequest;
+    import jakarta.servlet.http.HttpServletResponse;
+    import java.io.IOException;
+
+    public class HelloServlet extends HttpServlet {
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+                throws IOException {
+            resp.setContentType("text/plain");
+            resp.getWriter().println("Hello from Tomcat!");
+        }
+    }
+    ```
+
+    Package the application into a WAR file and drop it into `webapps/`:
+
+    ```bash
+    jar -cvf myapp.war -C myapp/ .
+    cp myapp.war $CATALINA_HOME/webapps/
+
+    # Test the servlet endpoint
+    curl http://localhost:8080/myapp/hello
+    # Hello from Tomcat!
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="server" href="/installation">
+    Detailed installation instructions including running as a system service, multiple instances, and Windows service setup.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/configuration/server-xml">
+    Complete reference for `conf/server.xml` — Connectors, Engines, Hosts, Contexts, Realms, and Valves.
+  </Card>
+</CardGroup>

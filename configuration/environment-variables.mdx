@@ -1,0 +1,171 @@
+---
+title: "Tomcat Environment Variables and JVM Options"
+sidebarTitle: "Environment Variables"
+description: "Reference for CATALINA_HOME, CATALINA_BASE, JAVA_HOME, CATALINA_OPTS, JAVA_OPTS, and the setenv script for configuring JVM memory and system properties."
+---
+
+Tomcat startup scripts (`catalina.sh` on Unix-like systems and `catalina.bat` on Windows) read several environment variables to assemble the `java` command used to launch the server process. These variables control which JVM is used, where Tomcat looks for its configuration, and what JVM flags and system properties are passed to the running process. Understanding the distinction between these variables — especially `CATALINA_OPTS` versus `JAVA_OPTS` — prevents common misconfiguration issues.
+
+## Core Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `CATALINA_HOME` | Yes | Root directory of the Tomcat binary distribution — the directory containing `bin/`, `lib/`, and `webapps/` as shipped. Used to locate startup scripts and shared libraries. |
+| `CATALINA_BASE` | No | Root directory of the **active configuration** for this Tomcat instance. Defaults to `CATALINA_HOME` when not set. Set to a separate directory to share one binary distribution across multiple instances. Contains `conf/`, `logs/`, `webapps/`, and `work/`. |
+| `JAVA_HOME` | One of these is required | Path to a JDK installation. Provides access to additional startup options (e.g., `java -server`) not available in a JRE-only installation. |
+| `JRE_HOME` | One of these is required | Path to a JRE installation. When both `JRE_HOME` and `JAVA_HOME` are set, `JRE_HOME` takes precedence. Use `JAVA_HOME` unless you specifically want a JRE-only runtime. |
+| `CATALINA_OPTS` | No | JVM options passed **only** to the Tomcat process start command (`catalina.sh start` / `catalina.sh run`). This is the correct place for memory settings, GC flags, and application-specific system properties. Not used by the stop command. |
+| `JAVA_OPTS` | No | JVM options added to **all** Java commands invoked by the Catalina scripts — including the stop command. Use sparingly. Do not put memory limits here, as they would apply to the lightweight stop process unnecessarily. |
+| `CATALINA_PID` | No | Path to a file where the PID of the forked Tomcat process is written (Unix only). Enables duplicate-start protection and allows `catalina.sh stop -force` to send `SIGKILL` to an unresponsive process. |
+| `CATALINA_TMPDIR` | No | Temporary directory passed to the JVM as `java.io.tmpdir`. Defaults to `$CATALINA_HOME/temp`. |
+| `LOGGING_CONFIG` | No | Path to a `java.util.logging` configuration file. Defaults to `$CATALINA_BASE/conf/logging.properties`. |
+| `LOGGING_MANAGER` | No | Fully-qualified class name of the Java logging manager. Defaults to `org.apache.juli.ClassLoaderLogManager`. |
+
+<Note>
+  `CATALINA_HOME` and `CATALINA_BASE` **cannot** be set inside the `setenv` script because the scripts use those variables to locate `setenv` in the first place. Set them in the calling shell environment or your init system unit file.
+</Note>
+
+## setenv Script
+
+The recommended way to configure all environment variables except `CATALINA_HOME` and `CATALINA_BASE` is through a `setenv` script. Place it in `$CATALINA_BASE/bin/` (preferred) or `$CATALINA_HOME/bin/`. Tomcat will source it automatically before building the Java command.
+
+<Tip>
+  Always use `setenv.sh` / `setenv.bat` rather than editing `catalina.sh` / `catalina.bat` directly. The `setenv` file is not shipped with Tomcat, so it will not be overwritten when you upgrade the binary distribution.
+</Tip>
+
+### setenv.sh (Unix/Linux/macOS)
+
+```bash
+#!/bin/sh
+
+# JVM options for the Tomcat process only
+export CATALINA_OPTS="-Xmx512m -Xms256m -XX:+UseG1GC"
+
+# Point to the JDK installation
+export JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
+
+# Write the PID to a file so the init system can manage the process
+export CATALINA_PID="/run/tomcat/tomcat.pid"
+
+# Custom temporary directory
+export CATALINA_TMPDIR="/var/tmp/tomcat"
+```
+
+### setenv.bat (Windows)
+
+```bat
+@echo off
+
+rem JVM options for the Tomcat process only
+set "CATALINA_OPTS=-Xmx512m -Xms256m -XX:+UseG1GC"
+
+rem Point to the JDK installation
+set "JAVA_HOME=C:\Program Files\Java\jdk-17"
+```
+
+The `setenv` file does not need to be executable (the calling script sources it), but on Unix you should set `chmod +x setenv.sh` as a best practice.
+
+## JVM Memory and GC Tuning
+
+All JVM tuning flags for the Tomcat process should be placed in `CATALINA_OPTS`. Common patterns:
+
+### Heap Sizing
+
+```bash
+export CATALINA_OPTS="\
+  -Xms256m \
+  -Xmx1024m"
+```
+
+| Flag | Description |
+|---|---|
+| `-Xms<size>` | Initial (minimum) heap size. Example: `-Xms256m`. Set equal to `-Xmx` to avoid heap resizing pauses. |
+| `-Xmx<size>` | Maximum heap size. Example: `-Xmx1024m`. Tune based on the resident set size of your application under load. |
+| `-XX:MetaspaceSize=<size>` | Initial metaspace size (class metadata, replaces PermGen from Java 8+). |
+| `-XX:MaxMetaspaceSize=<size>` | Maximum metaspace size. Prevents uncontrolled growth from classloader leaks. |
+
+### Garbage Collector Selection
+
+```bash
+export CATALINA_OPTS="\
+  -Xms512m -Xmx512m \
+  -XX:+UseG1GC \
+  -XX:MaxGCPauseMillis=200"
+```
+
+| Flag | Description |
+|---|---|
+| `-XX:+UseG1GC` | G1 (Garbage First) collector. Good balance of throughput and latency for most web applications. Default in Java 9+. |
+| `-XX:+UseZGC` | ZGC. Very low-latency collector (sub-millisecond pauses). Suitable for latency-sensitive applications on Java 15+. |
+| `-XX:+UseShenandoahGC` | Shenandoah GC. Concurrent compaction with low pauses. Available in OpenJDK builds. |
+| `-XX:MaxGCPauseMillis=<ms>` | Target maximum GC pause time. G1 uses this as a soft goal. |
+
+### GC Logging (Java 9+)
+
+```bash
+export CATALINA_OPTS="\
+  $CATALINA_OPTS \
+  -Xlog:gc*:file=${CATALINA_BASE}/logs/gc.log:time,uptime:filecount=5,filesize=10m"
+```
+
+### Remote JMX Monitoring
+
+```bash
+export CATALINA_OPTS="\
+  $CATALINA_OPTS \
+  -Dcom.sun.management.jmxremote \
+  -Dcom.sun.management.jmxremote.port=9090 \
+  -Dcom.sun.management.jmxremote.authenticate=false \
+  -Dcom.sun.management.jmxremote.ssl=false"
+```
+
+<Warning>
+  Disabling JMX authentication (`authenticate=false`) and SSL (`ssl=false`) is only appropriate on a trusted local network or within a secure Docker/Kubernetes environment. Always enable authentication and SSL in internet-facing deployments.
+</Warning>
+
+### System Properties
+
+Pass application-specific configuration as `-D` system properties:
+
+```bash
+export CATALINA_OPTS="\
+  $CATALINA_OPTS \
+  -Dmy.app.config=/etc/myapp/config.properties \
+  -Dspring.profiles.active=production \
+  -Dfile.encoding=UTF-8"
+```
+
+## catalina.properties
+
+`$CATALINA_BASE/conf/catalina.properties` controls the three Tomcat classloaders that sit between the JVM bootstrap loader and web application classloaders. Each is configured as a comma-separated list of file-system paths.
+
+```properties
+# Loaded by the "common" classloader — visible to both Tomcat internals
+# and all web applications. Add shared JARs here (e.g., JDBC drivers).
+common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar",\
+              "${catalina.home}/lib","${catalina.home}/lib/*.jar"
+
+# Loaded by the "server" classloader — visible only to Tomcat internals,
+# not to web applications. Empty by default.
+server.loader=
+
+# Loaded by the "shared" classloader — visible to all web applications
+# but not to Tomcat internals. Empty by default.
+shared.loader=
+```
+
+| Loader | Visible to Tomcat? | Visible to webapps? | Typical use |
+|---|---|---|---|
+| `common.loader` | Yes | Yes | Drivers and libraries shared across all apps and Tomcat itself. |
+| `server.loader` | Yes | No | Private Tomcat extensions (e.g., custom Realm implementations). |
+| `shared.loader` | No | Yes | Libraries shared between web applications without duplicating them per WAR. |
+
+To add a JDBC driver that all applications can use without bundling it in every WAR:
+
+```properties
+common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar",\
+              "${catalina.home}/lib","${catalina.home}/lib/*.jar",\
+              "/opt/jdbc-drivers/*.jar"
+```
+
+`catalina.properties` also contains the `tomcat.util.scan.StandardJarScanFilter.jarsToSkip` list — a large set of well-known JARs (Spring, Hibernate, Commons, etc.) that are excluded from TLD and web-fragment scanning at startup. Removing entries from this list will slow startup but may be necessary if a JAR incorrectly appears on the skip list.
