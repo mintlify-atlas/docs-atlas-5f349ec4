@@ -156,7 +156,7 @@ When the application is undeployed, JULI closes and removes all handlers registe
 | `%r` | First line of the HTTP request |
 | `%s` | HTTP response status code |
 | `%b` | Response body bytes sent (excluding headers); `-` if zero |
-| `%D` | Request processing time in milliseconds |
+| `%D` | Request processing time in microseconds |
 | `%T` | Request processing time in seconds |
 | `%{Header}i` | Incoming request header value |
 | `%{Header}o` | Outgoing response header value |
@@ -175,7 +175,7 @@ combined → %h %l %u %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"
 ### Example Configuration
 
 ```xml
-<!-- Combined log format with millisecond response time -->
+<!-- Combined log format with microsecond response time (%D) -->
 <Valve className="org.apache.catalina.valves.AccessLogValve"
        directory="logs"
        prefix="access_log"

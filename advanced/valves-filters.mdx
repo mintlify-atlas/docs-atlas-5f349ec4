@@ -193,7 +193,7 @@ Configure Filters in your web application's `web.xml` (or via annotations):
 
 | Init-param | Default | Description |
 |------------|---------|-------------|
-| `cors.allowed.origins` | `*` | Comma-separated allowed origins (use `*` for all) |
+| `cors.allowed.origins` | *(empty — no origins allowed)* | Comma-separated allowed origins; set to `*` to allow all |
 | `cors.allowed.methods` | `GET,POST,HEAD,OPTIONS` | Allowed HTTP methods |
 | `cors.allowed.headers` | `Origin,Accept,...` | Allowed request headers |
 | `cors.exposed.headers` | *(empty)* | Response headers exposed to the browser |

@@ -22,7 +22,7 @@ The default and most commonly used connector. When `protocol="HTTP/1.1"` is spec
 |---|---|---|
 | `port` | — | TCP port to bind. Required. Common values: `8080` (HTTP), `8443` (HTTPS). |
 | `protocol` | `HTTP/1.1` | Protocol handler. `HTTP/1.1` resolves to `Http11NioProtocol`. You can also specify the fully-qualified class name directly. |
-| `connectionTimeout` | `20000` | Milliseconds to wait for the client to send the request URI line after the TCP connection is accepted. |
+| `connectionTimeout` | `60000` | Milliseconds to wait for the client to send the request URI line after the TCP connection is accepted. The default `server.xml` ships with an explicit override of `20000`. |
 | `redirectPort` | `443` | Port used when a `<security-constraint>` in `web.xml` triggers an HTTP→HTTPS redirect. |
 | `maxThreads` | `200` | Maximum number of simultaneous request-processing threads in the internal thread pool. Requests beyond this limit queue up to `acceptCount`. |
 | `minSpareThreads` | `10` | Minimum number of idle threads kept alive in the pool at all times. |
@@ -124,7 +124,7 @@ AJP connector attributes:
 | `secret` | — | Shared secret string that the front-end proxy must send. Required when `secretRequired="true"`. |
 | `secretRequired` | `true` | When `true`, Tomcat refuses AJP connections that do not provide the correct `secret`. Disable only in fully trusted network segments. |
 | `packetSize` | `8192` | Maximum AJP packet size in bytes. Must match the corresponding setting in `mod_proxy_ajp`. Max is `65536`. |
-| `connectionTimeout` | `60000` | Milliseconds to wait for an AJP packet from the front-end server. |
+| `connectionTimeout` | `-1` | Milliseconds to wait for an AJP packet from the front-end server. `-1` means wait indefinitely (no timeout), which is the AJP default since the front-end proxy controls connection lifetime. |
 
 ## Shared Thread Pool (Executor)
 

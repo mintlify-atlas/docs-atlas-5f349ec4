@@ -234,7 +234,7 @@ Tomcat provides a full WebSocket client implementation via `WsWebSocketContainer
 
 ```java WebSocketClient.java lines
 import jakarta.websocket.*;
-import org.apache.tomcat.websocket.WsWebSocketContainer;
+import java.io.IOException;
 import java.net.URI;
 
 @ClientEndpoint

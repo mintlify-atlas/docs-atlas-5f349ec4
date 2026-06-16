@@ -60,8 +60,7 @@ The following is the default `conf/context.xml` that ships with Tomcat. It appli
 | `sessionCookieName` | `JSESSIONID` | Name of the HTTP session tracking cookie. Override to avoid conflicts when multiple apps run on the same domain. |
 | `sessionCookiePath` | Context path | Cookie `Path` attribute. Set to `/` to share the session cookie across all contexts on the same host. |
 | `sessionCookieSecure` | `false` | Set to `true` to mark the session cookie with the `Secure` flag, restricting it to HTTPS connections. |
-| `sessionCookieHttpOnly` | `true` | Controls the `HttpOnly` flag on the session cookie. |
-| `useHttpOnly` | `true` | Alias for `sessionCookieHttpOnly`. Set `HttpOnly` on the `JSESSIONID` cookie to prevent JavaScript access. |
+| `useHttpOnly` | `true` | Set `HttpOnly` on the `JSESSIONID` cookie to prevent JavaScript access. |
 | `antiResourceLocking` | `false` | When `true`, Tomcat copies the application to a work directory before deploying it. Prevents file-locking issues on Windows that block redeployment while the JVM holds open file handles. |
 
 ## JNDI Resource Configuration

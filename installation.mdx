@@ -159,7 +159,7 @@ The values of `CATALINA_HOME` and `CATALINA_BASE` are available as `${catalina.h
     After=network.target
 
     [Service]
-    Type=forking
+    Type=exec
 
     User=tomcat
     Group=tomcat
@@ -167,10 +167,9 @@ The values of `CATALINA_HOME` and `CATALINA_BASE` are available as `${catalina.h
     Environment="JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64"
     Environment="CATALINA_HOME=/opt/tomcat"
     Environment="CATALINA_BASE=/opt/tomcat"
-    Environment="CATALINA_PID=/opt/tomcat/temp/tomcat.pid"
     Environment="CATALINA_OPTS=-Xms512m -Xmx1024m -server -XX:+UseG1GC"
 
-    ExecStart=/opt/tomcat/bin/startup.sh
+    ExecStart=/opt/tomcat/bin/catalina.sh run
     ExecStop=/opt/tomcat/bin/shutdown.sh
 
     Restart=on-failure

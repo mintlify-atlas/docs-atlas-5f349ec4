@@ -50,21 +50,25 @@ The file is loaded once when Tomcat starts; changes require a restart to take ef
 
 **Default `conf/tomcat-users.xml` structure:**
 
+The file ships with **all user and role entries commented out**. No active users exist in a fresh Tomcat installation. Remove the comment delimiters and replace the `<must-be-changed>` placeholders with real (hashed) passwords before first use:
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <tomcat-users xmlns="http://tomcat.apache.org/xml"
               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
               xsi:schemaLocation="http://tomcat.apache.org/xml tomcat-users.xsd"
               version="1.0">
-
-  <role rolename="manager-gui"/>
+<!--
+  <user username="admin" password="<must-be-changed>" roles="manager-gui"/>
+  <user username="robot" password="<must-be-changed>" roles="manager-script"/>
+-->
+<!--
   <role rolename="tomcat"/>
   <role rolename="role1"/>
-
-  <!-- Passwords must be changed before use -->
-  <user username="admin" password="s3cr3t!" roles="manager-gui"/>
-  <user username="tomcat" password="s3cr3t!" roles="tomcat"/>
-  <user username="both"   password="s3cr3t!" roles="tomcat,role1"/>
+  <user username="tomcat" password="<must-be-changed>" roles="tomcat"/>
+  <user username="both"   password="<must-be-changed>" roles="tomcat,role1"/>
+  <user username="role1"  password="<must-be-changed>" roles="role1"/>
+-->
 </tomcat-users>
 ```
 

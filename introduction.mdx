@@ -63,7 +63,7 @@ NEW → INITIALIZING → INITIALIZED → STARTING_PREP → STARTING → STARTED
 DESTROYED ← DESTROYING ← STOPPED ← STOPPING ← STOPPING_PREP ←────┘
 ```
 
-The `FAILED` state can be entered from `STARTING` or `STOPPING` if an unrecoverable error occurs. Once in `FAILED`, the component may transition to `STOPPING_PREP` for cleanup, or directly to `DESTROYED`.
+Any state can transition to `FAILED`. Once in `FAILED`, the component may transition to `STOPPING_PREP` (via an explicit `stop()` call) for coordinated shutdown, or to `DESTROYING` (via `destroy()`) which then proceeds to `DESTROYED`.
 
 External code observes these transitions by registering a `LifecycleListener`:
 
@@ -80,6 +80,7 @@ Tomcat's own `conf/server.xml` ships with several built-in listeners attached to
 
 ```xml
 <Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+<Listener className="org.apache.catalina.security.SecurityListener" />
 <Listener className="org.apache.catalina.core.AprLifecycleListener" />
 <Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
 <Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />

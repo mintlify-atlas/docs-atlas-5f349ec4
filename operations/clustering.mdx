@@ -95,7 +95,7 @@ Key `SimpleTcpCluster` attributes:
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `channelSendOptions` | `8` | Bit-field controlling message delivery guarantees. `8` = `SEND_OPTIONS_SYNCHRONIZED_ACK` (synchronous, acknowledged delivery) |
+| `channelSendOptions` | `8` | Bit-field controlling message delivery guarantees. `8` = `SEND_OPTIONS_ASYNCHRONOUS` (message placed on a queue and sent by a separate thread) |
 | `channelStartOptions` | `15` | Which Channel services to start (bitmask; `15` = all) |
 | `heartbeatBackgroundEnabled` | `false` | Run `Channel.heartbeat()` in the container background thread |
 

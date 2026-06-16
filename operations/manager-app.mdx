@@ -101,7 +101,7 @@ The text API is available at `/manager/text/` and is designed for scripted acces
 | `/manager/text/start?path=` | GET | Start a previously stopped application |
 | `/manager/text/stop?path=` | GET | Stop a running application (keeps it registered) |
 | `/manager/text/reload?path=` | GET | Reload the application (stop + start the context) |
-| `/manager/text/sessions?path=` | GET | Display session count and inactivity distribution |
+| `/manager/text/sessions?path=` | GET | **Deprecated.** Use `/expire` instead. Displays session idle time distribution |
 | `/manager/text/expire?path=&idle=` | GET | Expire sessions idle for more than `idle` minutes |
 | `/manager/text/findleaks` | GET | Find applications that triggered memory leaks on previous reload/undeploy |
 | `/manager/text/serverinfo` | GET | Display Tomcat version, OS, JVM, and hostname |
